@@ -4,13 +4,44 @@ ROS2を使用したLeKiwiロボットのテレオペレーションとVLA推論�
 
 ## 概要
 
-このパッケージには2つのノードが含まれています:
+このパッケージには3つのノードが含まれています:
 
 1. **lekiwi_teleop_node**: `lekiwi_host.py`を参考に作成されており、ZMQ通信の代わりにROS2トピック通信を使用してLeKiwiロボットを制御します。
 
 2. **lekiwi_vla_node**: LeRobotのVLA (Vision-Language-Action) モデルを使用して、カメラ画像とロボット状態から次のアクションを自動生成します。
 
+3. **lekiwi_ros2_teleop_client**: SO100 Leader ArmとKeyboardからのテレオペレーション入力を受け取り、ROS2トピック経由でlekiwi_teleop_nodeを制御します。
+
 ## アーキテクチャ
+
+### パターン1: ダイレクトテレオペレーション（lekiwi_ros2_teleop_client）
+
+```
+┌────────────────────┐
+│ SO100 Leader Arm   │
+│ Keyboard           │
+└─────────┬──────────┘
+          │ input
+          ↓
+┌─────────────────────────┐
+│ lekiwi_ros2_teleop_     │
+│       client            │
+└──────────┬──────────────┘
+           │ publishes (ROS2)
+           ↓
+    ┌──────────────┐
+    │ /cmd_vel     │
+    │ /arm_joint_  │
+    │  commands    │
+    └──────┬───────┘
+           │ subscribes
+           ↓
+┌─────────────────────┐
+│  lekiwi_teleop_node │ → LeKiwi Robot
+└─────────────────────┘
+```
+
+### パターン2: VLA自律制御
 
 ```
 ┌─────────────────────┐
@@ -58,6 +89,13 @@ ROS2を使用したLeKiwiロボットのテレオペレーションとVLA推論�
 - **時間的アンサンブル**: 滑らかな動作のための時間的フィルタリング
 - **リアルタイム制御**: 設定可能な推論周波数で動作
 
+### lekiwi_ros2_teleop_client
+
+- **テレオペレーション**: SO100 Leader ArmとKeyboardからの入力取得
+- **ROS2パブリッシュ**: lekiwi_teleop_nodeへコマンド送信
+- **環境変数対応**: `LEKIWI_REMOTE_IP`でLeKiwiのIPアドレスを指定
+- **可視化**: Rerun統合によるリアルタイムモニタリング（オプション）
+
 ## トピック
 
 ### Subscribe (受信)
@@ -98,11 +136,23 @@ ROS2を使用したLeKiwiロボットのテレオペレーションとVLA推論�
 - `use_cuda` (bool, default: true): CUDAを使用するか
 - `temporal_ensemble_coeff` (float, default: 0.01): 時間的アンサンブルの係数 (0.0-1.0)
 
+### lekiwi_ros2_teleop_client
+
+- `lekiwi_remote_ip` (string, default: ""): LeKiwiのIPアドレス（空の場合は環境変数`LEKIWI_REMOTE_IP`を使用）
+- `lekiwi_id` (string, default: "my_lekiwi"): LeKiwiのID
+- `leader_arm_port` (string, default: "/dev/tty.usbmodem585A0077581"): SO100 Leader Armのシリアルポート
+- `leader_arm_id` (string, default: "my_leader_arm"): Leader ArmのID
+- `keyboard_id` (string, default: "my_keyboard"): KeyboardのID
+- `control_frequency` (float, default: 30.0): 制御ループ周波数 (Hz)
+- `use_rerun` (bool, default: false): Rerun可視化を使用するか
+
 ## セットアップ
 
 ### 1. 環境変数の設定（必須）
 
-VLAノードを使用するには、LeRobotのパスを環境変数として設定する必要があります。
+#### LEROBOT_PATH（必須）
+
+両方のノードで必要です。LeRobotのパスを環境変数として設定します。
 お使いのシェルの設定ファイルを編集してください：
 
 **bashの場合 (`~/.bashrc`):**
@@ -126,6 +176,15 @@ export LEROBOT_PATH="$HOME/study/lerobot/src"
 export LEROBOT_PATH="/opt/lerobot/src"
 ```
 
+#### LEKIWI_REMOTE_IP（lekiwi_ros2_teleop_clientで必須）
+
+テレオペレーションクライアントを使用する場合、LeKiwiのIPアドレスを設定します：
+
+```bash
+# LeKiwiのIPアドレスを設定
+export LEKIWI_REMOTE_IP="172.18.134.136"
+```
+
 設定を反映：
 ```bash
 source ~/.bashrc  # または source ~/.zshrc
@@ -137,9 +196,12 @@ source ~/.bashrc  # または source ~/.zshrc
 ```bash
 echo $LEROBOT_PATH
 # 出力例: /home/your_username/study/lerobot/src
+
+echo $LEKIWI_REMOTE_IP
+# 出力例: 172.18.134.136
 ```
 
-**注意**: 環境変数が設定されていない場合、両方のノードの起動時にエラーが発生します。
+**注意**: 環境変数が設定されていない場合、ノードの起動時にエラーが発生します。
 
 **Micromamba環境での注意点**:
 - `micromamba run -n leros` コマンドは新しいシェルを起動するため、`.bashrc`が自動的に読み込まれます
@@ -181,7 +243,41 @@ source install/setup.bash
 
 ## 実行
 
-### Teleopノード
+### 1. テレオペレーション（Leader Arm + Keyboard）
+
+#### ターミナル1: LeKiwi上でlekiwi_teleop_nodeを起動
+
+```bash
+# LeKiwiロボット上で実行
+micromamba run -n leros ros2 run lekiwi_ros2_teleop lekiwi_teleop_node \
+  --ros-args -p robot_port:=/dev/ttyACM0
+```
+
+#### ターミナル2: PC上でlekiwi_ros2_teleop_clientを起動
+
+```bash
+# 環境変数を設定（.bashrcに書いていない場合）
+export LEROBOT_PATH="$HOME/study/lerobot/src"
+export LEKIWI_REMOTE_IP="172.18.134.136"
+
+# テレオペレーションクライアントを起動
+micromamba run -n leros ros2 run lekiwi_ros2_teleop lekiwi_ros2_teleop_client
+
+# パラメータ指定の例
+micromamba run -n leros ros2 run lekiwi_ros2_teleop lekiwi_ros2_teleop_client \
+  --ros-args \
+  -p leader_arm_port:=/dev/ttyUSB0 \
+  -p control_frequency:=30.0 \
+  -p use_rerun:=true
+```
+
+これで、SO100 Leader Armでロボットアームを、Keyboardでベースを操作できます。
+
+### 2. VLA自律制御
+
+#### ターミナル1: Teleopノード（ロボット制御）
+
+#### ターミナル1: Teleopノード（ロボット制御）
 
 ```bash
 # デフォルトで実行
@@ -199,7 +295,9 @@ micromamba run -n leros ros2 run lekiwi_ros2_teleop lekiwi_teleop_node \
   --ros-args -p rotate_front_camera:=false
 ```
 
-### VLAノード
+#### ターミナル2: VLAノード（自律制御）
+
+#### ターミナル2: VLAノード（自律制御）
 
 ```bash
 # VLAノードを実行（policy_pathは必須）
@@ -218,46 +316,7 @@ micromamba run -n leros ros2 run lekiwi_ros2_teleop lekiwi_vla_node \
   -p inference_frequency:=10.0
 ```
 
-### 両方のノードを同時に実行
-
-```bash
-# ターミナル1: Teleopノード（ロボット制御）
-micromamba run -n leros ros2 run lekiwi_ros2_teleop lekiwi_teleop_node
-
-# ターミナル2: VLAノード（自律制御）
-# SmolVLAモデルを使用
-micromamba run -n leros ros2 run lekiwi_ros2_teleop lekiwi_vla_node \
-  --ros-args -p policy_path:=lerobot/smolvla_base
-
-# または X-VLAモデルを使用
-micromamba run -n leros ros2 run lekiwi_ros2_teleop lekiwi_vla_node \
-  --ros-args -p policy_path:=lerobot/xvla-base
-```
-
-## 使用例
-
-### VLAノードでの自律制御
-
-```bash
-# VLAノードで自律的にロボットを制御
-# ターミナル1: Teleopノードを起動
-micromamba run -n leros ros2 run lekiwi_ros2_teleop lekiwi_teleop_node
-
-# ターミナル2: VLAノードを起動（タスク指示を指定）
-# SmolVLAモデルを使用（推奨: 軽量で効率的）
-micromamba run -n leros ros2 run lekiwi_ros2_teleop lekiwi_vla_node \
-  --ros-args \
-  -p policy_path:=lerobot/smolvla_base \
-  -p task_instruction:="Pick up the red cup and place it on the table"
-
-# X-VLAモデルを使用（クロスエンボディメント対応）
-micromamba run -n leros ros2 run lekiwi_ros2_teleop lekiwi_vla_node \
-  --ros-args \
-  -p policy_path:=lerobot/xvla-base \
-  -p task_instruction:="Grasp the object"
-```
-
-### キーボードでベース制御
+### 3. キーボードでベース制御（手動）
 
 ```bash
 # teleop_twist_keyboardパッケージを使用
@@ -265,7 +324,7 @@ micromamba run -n leros ros2 run teleop_twist_keyboard teleop_twist_keyboard \
   --ros-args -r /cmd_vel:=/lekiwi/cmd_vel
 ```
 
-### カメラ画像の表示
+### 4. カメラ画像の表示
 
 ```bash
 # rqtで画像表示
@@ -273,7 +332,7 @@ micromamba run -n leros rqt_image_view
 # トピック: /lekiwi/camera/front/image_raw/compressed
 ```
 
-### 関節状態のモニタリング
+### 5. 関節状態のモニタリング
 
 ```bash
 micromamba run -n leros ros2 topic echo /lekiwi/joint_states
@@ -358,7 +417,10 @@ micromamba run -n leros ros2 run lekiwi_ros2_teleop lekiwi_vla_node \
   - 例: `export LEROBOT_PATH="$HOME/study/lerobot/src"`
   - 例: `export LEROBOT_PATH="/opt/lerobot/src"`
   
-**注意**: この環境変数が設定されていないと、VLAノードは起動時にエラーを出力します。
+- `LEKIWI_REMOTE_IP` (lekiwi_ros2_teleop_clientで必須): LeKiwiロボットのIPアドレス
+  - 例: `export LEKIWI_REMOTE_IP="172.18.134.136"`
+  
+**注意**: 環境変数が設定されていないと、各ノードは起動時にエラーを出力します。
 
 ## 参考リンク
 
