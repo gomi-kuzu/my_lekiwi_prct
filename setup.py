@@ -26,6 +26,7 @@ setup(
         'console_scripts': [
             'lekiwi_teleop_node = lekiwi_ros2_teleop.lekiwi_teleop_node:main',
             'lekiwi_vla_node = lekiwi_ros2_teleop.lekiwi_vla_node:main',
+            'lekiwi_ros2_teleop_client = lekiwi_ros2_teleop.lekiwi_ros2_teleop_client:main',
         ],
     },
 )
