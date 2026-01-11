@@ -122,10 +122,30 @@ class LeKiwiROS2TeleopClient(Node):
         # Connect teleoperators
         try:
             self.get_logger().info('Connecting to SO100 Leader Arm...')
-            self.leader_arm.connect()
-            self.get_logger().info('Leader arm connected successfully!')
+            # Try to connect with retry
+            max_retries = 3
+            retry_delay = 1.0
+            for attempt in range(max_retries):
+                try:
+                    self.leader_arm.connect()
+                    self.get_logger().info('Leader arm connected successfully!')
+                    break
+                except Exception as connect_error:
+                    if attempt < max_retries - 1:
+                        self.get_logger().warn(
+                            f'Failed to connect to leader arm (attempt {attempt + 1}/{max_retries}): {connect_error}'
+                        )
+                        self.get_logger().info(f'Retrying in {retry_delay} seconds...')
+                        time.sleep(retry_delay)
+                    else:
+                        raise
         except Exception as e:
-            self.get_logger().error(f'Failed to connect to leader arm: {e}')
+            self.get_logger().error(f'Failed to connect to leader arm after {max_retries} attempts: {e}')
+            self.get_logger().error('Please check:')
+            self.get_logger().error(f'  - Serial port {leader_arm_port} is correct')
+            self.get_logger().error('  - Device is powered on and connected')
+            self.get_logger().error('  - No other process is using the serial port')
+            self.get_logger().error('  - User has permission to access the serial port')
             raise
         
         if self.use_keyboard and self.keyboard is not None:

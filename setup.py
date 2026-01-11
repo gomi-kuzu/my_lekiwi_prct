@@ -1,4 +1,6 @@
 from setuptools import find_packages, setup
+import os
+from glob import glob
 
 package_name = 'lekiwi_ros2_teleop'
 
@@ -10,6 +12,7 @@ setup(
         ('share/ament_index/resource_index/packages',
             ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
+        (os.path.join('share', package_name, 'launch'), glob('launch/*.launch.py')),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
@@ -27,6 +30,8 @@ setup(
             'lekiwi_teleop_node = lekiwi_ros2_teleop.lekiwi_teleop_node:main',
             'lekiwi_vla_node = lekiwi_ros2_teleop.lekiwi_vla_node:main',
             'lekiwi_ros2_teleop_client = lekiwi_ros2_teleop.lekiwi_ros2_teleop_client:main',
+            'lekiwi_data_recorder = lekiwi_ros2_teleop.lekiwi_data_recorder:main',
+            'lekiwi_upload_dataset = lekiwi_ros2_teleop.upload_dataset:main',
         ],
     },
 )

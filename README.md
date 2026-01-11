@@ -4,13 +4,46 @@ ROS2を使用したLeKiwiロボットのテレオペレーションとVLA推論�
 
 ## 概要
 
-このパッケージには3つのノードが含まれています:
+このパッケージには4つのノードが含まれています:
 
 1. **lekiwi_teleop_node**: `lekiwi_host.py`を参考に作成されており、ZMQ通信の代わりにROS2トピック通信を使用してLeKiwiロボットを制御します。
 
 2. **lekiwi_vla_node**: LeRobotのVLA (Vision-Language-Action) モデルを使用して、カメラ画像とロボット状態から次のアクションを自動生成します。
 
 3. **lekiwi_ros2_teleop_client**: SO100 Leader ArmとKeyboardからのテレオペレーション入力を受け取り、ROS2トピック経由でlekiwi_teleop_nodeを制御します。
+
+4. **lekiwi_data_recorder**: テレオペレーション中のデータをLeRobot Dataset v3形式で記録し、VLAモデルのトレーニングに使用できるデータセットを作成します。
+
+## データ記録
+
+テレオペレーション中のデータを記録してVLAモデルのトレーニング用データセットを作成できます。
+詳細な使用方法、トラブルシューティング、Hugging Faceへのアップロード方法については、[docs/RECORDING.md](docs/RECORDING.md)を参照してください。
+
+**クイックスタート:**
+
+```bash
+# データ記録を開始
+ros2 launch lekiwi_ros2_teleop lekiwi_record.launch.py \
+    launch_teleop:=false \
+    dataset_repo_id:=username/my_dataset \
+    single_task:="Pick and place the cube" \
+    fps:=30
+
+# エピソード開始
+ros2 service call /lekiwi/data_recorder/start_episode std_srvs/srv/Trigger
+
+# エピソード終了
+ros2 service call /lekiwi/data_recorder/stop_episode std_srvs/srv/Trigger
+
+# データセット保存
+ros2 service call /lekiwi/data_recorder/save_dataset std_srvs/srv/Trigger
+```
+
+**主な機能:**
+- LeRobot Dataset v3形式での記録
+- カメラ画像（フロント・リスト）と関節状態の同期記録
+- エピソード単位での管理
+- Hugging Face Hubへのアップロード対応
 
 ## アーキテクチャ
 
@@ -270,7 +303,7 @@ conda run -n leros_jazzy ros2 run lekiwi_ros2_teleop lekiwi_ros2_teleop_client \
 # パラメータ指定の例
 conda run -n leros_jazzy ros2 run lekiwi_ros2_teleop lekiwi_ros2_teleop_client \
   --ros-args \
-  -p leader_arm_port:=/dev/ttyUSB0 \
+  -p leader_arm_port:=/dev/ttyACM0 \
   -p control_frequency:=30.0 \
   -p use_keyboard:=false \
   -p use_rerun:=true
