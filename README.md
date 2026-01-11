@@ -145,6 +145,7 @@ ROS2を使用したLeKiwiロボットのテレオペレーションとVLA推論�
 - `keyboard_id` (string, default: "my_keyboard"): KeyboardのID
 - `control_frequency` (float, default: 30.0): 制御ループ周波数 (Hz)
 - `use_rerun` (bool, default: false): Rerun可視化を使用するか
+- `use_keyboard` (bool, default: true): 内部キーボードテレオペレーションを使用するか（falseの場合は外部のteleop_twist_keyboardを使用）
 
 ## セットアップ
 
@@ -260,18 +261,81 @@ micromamba run -n leros ros2 run lekiwi_ros2_teleop lekiwi_teleop_node \
 export LEROBOT_PATH="$HOME/study/lerobot/src"
 export LEKIWI_REMOTE_IP="172.18.134.136"
 
-# テレオペレーションクライアントを起動
-micromamba run -n leros ros2 run lekiwi_ros2_teleop lekiwi_ros2_teleop_client
+# キーボードテレオペレーションを無効化して起動（推奨）
+conda run -n leros_jazzy ros2 run lekiwi_ros2_teleop lekiwi_ros2_teleop_client \
+  --ros-args \
+  -p leader_arm_port:=/dev/ttyACM0 \
+  -p use_keyboard:=false
 
 # パラメータ指定の例
-micromamba run -n leros ros2 run lekiwi_ros2_teleop lekiwi_ros2_teleop_client \
+conda run -n leros_jazzy ros2 run lekiwi_ros2_teleop lekiwi_ros2_teleop_client \
   --ros-args \
   -p leader_arm_port:=/dev/ttyUSB0 \
   -p control_frequency:=30.0 \
+  -p use_keyboard:=false \
   -p use_rerun:=true
 ```
 
-これで、SO100 Leader Armでロボットアームを、Keyboardでベースを操作できます。
+#### ターミナル3: PC上でteleop_twist_keyboardを起動（ベース制御用）
+
+```bash
+# 標準のROS2キーボードテレオペレーションを使用
+conda run -n leros_jazzy ros2 run teleop_twist_keyboard teleop_twist_keyboard \
+  --ros-args -r /cmd_vel:=/lekiwi/cmd_vel
+```
+
+これで、SO100 Leader Armでロボットアームを、teleop_twist_keyboardでベースを操作できます。
+
+#### キーボード操作方法（teleop_twist_keyboard）
+
+ターミナル3にフォーカスを当てて、以下のキーで台車を操作します：
+
+#### キーボード操作方法（teleop_twist_keyboard）
+
+ターミナル3にフォーカスを当てて、以下のキーで台車を操作します：
+
+**基本移動:**
+- **i**: 前進
+- **,**: 後退
+- **j**: 左回転
+- **l**: 右回転
+- **k**: 停止
+
+**斜め移動:**
+- **u**: 前進+左回転
+- **o**: 前進+右回転
+- **m**: 後退+左回転
+- **.**: 後退+右回転
+
+**速度調整:**
+- **q**: 速度アップ（全体）
+- **z**: 速度ダウン（全体）
+- **w**: 直進速度のみアップ
+- **x**: 直進速度のみダウン
+- **e**: 回転速度のみアップ
+- **c**: 回転速度のみダウン
+
+**終了:**
+- **Ctrl+C**: 終了
+
+**注意事項:**
+- キーボード入力が動作するには、teleop_twist_keyboardを実行しているターミナルウィンドウにフォーカスが当たっている必要があります
+- キーを押し続ける必要はありません。一度押せば継続的に動作します
+- 停止するには**k**キーを押してください
+
+#### 動作確認
+
+別のターミナルで以下のコマンドを実行して、cmd_velトピックが配信されているか確認できます：
+
+```bash
+# ベース速度コマンドの監視
+conda run -n leros_jazzy ros2 topic echo /lekiwi/cmd_vel
+
+# または、トピックの配信頻度を確認
+conda run -n leros_jazzy ros2 topic hz /lekiwi/cmd_vel
+```
+
+teleop_twist_keyboardでキーを押したときに、`/lekiwi/cmd_vel`にメッセージが配信されていれば正常です。
 
 ### 2. VLA自律制御
 
@@ -316,24 +380,26 @@ micromamba run -n leros ros2 run lekiwi_ros2_teleop lekiwi_vla_node \
   -p inference_frequency:=10.0
 ```
 
-### 3. キーボードでベース制御（手動）
+### 3. キーボード単独でベース制御（Leader Armなし）
+
+Leader Armを使用せず、キーボードのみでベースを制御する場合：
 
 ```bash
 # teleop_twist_keyboardパッケージを使用
-micromamba run -n leros ros2 run teleop_twist_keyboard teleop_twist_keyboard \
+conda run -n leros_jazzy ros2 run teleop_twist_keyboard teleop_twist_keyboard \
   --ros-args -r /cmd_vel:=/lekiwi/cmd_vel
 ```
 
 ### 4. カメラ画像の表示
 
-```bash
-# rqtで画像表示
-micromamba run -n leros rqt_image_view
+conda run -n leros_jazzy rqt_image_view
 # トピック: /lekiwi/camera/front/image_raw/compressed
 ```
 
 ### 5. 関節状態のモニタリング
 
+```bash
+conda run -n leros_jazzy
 ```bash
 micromamba run -n leros ros2 topic echo /lekiwi/joint_states
 ```

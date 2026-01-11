@@ -77,6 +77,7 @@ class LeKiwiROS2TeleopClient(Node):
         self.declare_parameter('keyboard_id', 'my_keyboard')
         self.declare_parameter('control_frequency', 30.0)
         self.declare_parameter('use_rerun', False)
+        self.declare_parameter('use_keyboard', True)  # Enable/disable keyboard teleop
         
         # Get parameters
         lekiwi_ip = self.get_parameter('lekiwi_remote_ip').value
@@ -86,6 +87,7 @@ class LeKiwiROS2TeleopClient(Node):
         keyboard_id = self.get_parameter('keyboard_id').value
         self.control_frequency = self.get_parameter('control_frequency').value
         self.use_rerun = self.get_parameter('use_rerun').value
+        self.use_keyboard = self.get_parameter('use_keyboard').value
         
         # Get LeKiwi IP from environment variable if not specified in parameter
         if not lekiwi_ip:
@@ -109,9 +111,13 @@ class LeKiwiROS2TeleopClient(Node):
         teleop_arm_config = SO100LeaderConfig(port=leader_arm_port, id=leader_arm_id)
         self.leader_arm = SO100Leader(teleop_arm_config)
         
-        self.get_logger().info('Initializing Keyboard Teleop...')
-        keyboard_config = KeyboardTeleopConfig(id=keyboard_id)
-        self.keyboard = KeyboardTeleop(keyboard_config)
+        if self.use_keyboard:
+            self.get_logger().info('Initializing Keyboard Teleop...')
+            keyboard_config = KeyboardTeleopConfig(id=keyboard_id)
+            self.keyboard = KeyboardTeleop(keyboard_config)
+        else:
+            self.get_logger().info('Keyboard teleop disabled - use external teleop_twist_keyboard instead')
+            self.keyboard = None
         
         # Connect teleoperators
         try:
@@ -122,13 +128,17 @@ class LeKiwiROS2TeleopClient(Node):
             self.get_logger().error(f'Failed to connect to leader arm: {e}')
             raise
         
-        try:
-            self.get_logger().info('Connecting to Keyboard...')
-            self.keyboard.connect()
-            self.get_logger().info('Keyboard connected successfully!')
-        except Exception as e:
-            self.get_logger().error(f'Failed to connect to keyboard: {e}')
-            raise
+        if self.use_keyboard and self.keyboard is not None:
+            try:
+                self.get_logger().info('Connecting to Keyboard...')
+                self.keyboard.connect()
+                if self.keyboard.is_connected:
+                    self.get_logger().info('Keyboard connected successfully!')
+                else:
+                    self.get_logger().warn('Keyboard connect() called, but is_connected=False (pynput may not be available)')
+            except Exception as e:
+                self.get_logger().error(f'Failed to connect to keyboard: {e}')
+                raise
         
         # Initialize Rerun if requested
         if self.use_rerun:
@@ -225,9 +235,13 @@ class LeKiwiROS2TeleopClient(Node):
             # Arm action from SO100 Leader
             arm_action = self.leader_arm.get_action()
             
-            # Keyboard action for base
-            keyboard_keys = self.keyboard.get_action()
-            base_action = self.robot._from_keyboard_to_base_action(keyboard_keys)
+            # Keyboard action for base (only if keyboard is enabled)
+            if self.use_keyboard and self.keyboard is not None:
+                keyboard_keys = self.keyboard.get_action()
+                base_action = self.robot._from_keyboard_to_base_action(keyboard_keys)
+            else:
+                # No keyboard input - base will be controlled by external topic
+                base_action = {'x.vel': 0.0, 'y.vel': 0.0, 'theta.vel': 0.0}
             
             # Publish arm joint commands
             self._publish_arm_commands(arm_action)
@@ -297,11 +311,12 @@ class LeKiwiROS2TeleopClient(Node):
         except Exception as e:
             self.get_logger().error(f'Error disconnecting leader arm: {e}')
         
-        try:
-            self.keyboard.disconnect()
-            self.get_logger().info('Keyboard disconnected')
-        except Exception as e:
-            self.get_logger().error(f'Error disconnecting keyboard: {e}')
+        if self.use_keyboard and self.keyboard is not None:
+            try:
+                self.keyboard.disconnect()
+                self.get_logger().info('Keyboard disconnected')
+            except Exception as e:
+                self.get_logger().error(f'Error disconnecting keyboard: {e}')
 
 
 def main(args=None):
