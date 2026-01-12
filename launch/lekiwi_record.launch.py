@@ -55,12 +55,12 @@ def generate_launch_description():
     leader_arm_port_arg = DeclareLaunchArgument(
         'leader_arm_port',
         default_value='/dev/ttyACM0',
-        description='Serial port for SO100 Leader Arm'
+        description='Serial port for SO101 Leader Arm'
     )
     
     control_frequency_arg = DeclareLaunchArgument(
         'control_frequency',
-        default_value='30.0',
+        default_value='50.0',
         description='Control loop frequency in Hz'
     )
     

@@ -38,6 +38,17 @@ ros2 run lekiwi_ros2_teleop lekiwi_ros2_teleop_client \
     -p use_keyboard:=false
 ```
 
+台車をキーボード操作する場合
+
+```bash
+ros2 run teleop_twist_keyboard teleop_twist_keyboard   --ros-args -r /cmd_vel:=/lekiwi/cmd_vel
+```
+
+台車をjoyコン操作する場合
+```bash
+ros2 launch lekiwi_ros2_teleop custom_teleop.launch.py
+```
+
 #### ステップ2: データレコーダーノードを起動（別のターミナル）
 
 ```bash
@@ -45,7 +56,7 @@ source install/setup.bash
 ros2 launch lekiwi_ros2_teleop lekiwi_record.launch.py \
     launch_teleop:=false \
     dataset_repo_id:=username/my_dataset \
-    single_task:="Pick and place the cube" \
+    single_task:="Pick and place the bottle cap" \
     fps:=30
 ```
 

@@ -255,19 +255,15 @@ class LeKiwiROS2TeleopClient(Node):
             # Arm action from SO100 Leader
             arm_action = self.leader_arm.get_action()
             
+            # Publish arm joint commands
+            self._publish_arm_commands(arm_action)
+            
             # Keyboard action for base (only if keyboard is enabled)
             if self.use_keyboard and self.keyboard is not None:
                 keyboard_keys = self.keyboard.get_action()
                 base_action = self.robot._from_keyboard_to_base_action(keyboard_keys)
-            else:
-                # No keyboard input - base will be controlled by external topic
-                base_action = {'x.vel': 0.0, 'y.vel': 0.0, 'theta.vel': 0.0}
-            
-            # Publish arm joint commands
-            self._publish_arm_commands(arm_action)
-            
-            # Publish base velocity commands
-            self._publish_base_commands(base_action)
+                # Publish base velocity commands
+                self._publish_base_commands(base_action)
             
             # Visualize with rerun if enabled
             if self.use_rerun and len(self.current_observation) > 0:
@@ -275,7 +271,11 @@ class LeKiwiROS2TeleopClient(Node):
                     from lerobot.utils.visualization_utils import log_rerun_data
                     # Combine arm and base actions
                     combined_action = {f"arm_{k}": v for k, v in arm_action.items()}
-                    combined_action.update(base_action)
+                    # Only add base action if keyboard is enabled
+                    if self.use_keyboard and self.keyboard is not None:
+                        keyboard_keys = self.keyboard.get_action()
+                        base_action = self.robot._from_keyboard_to_base_action(keyboard_keys)
+                        combined_action.update(base_action)
                     log_rerun_data(observation=self.current_observation, action=combined_action)
                 except Exception as e:
                     self.get_logger().warn(f'Failed to log rerun data: {e}', throttle_duration_sec=5.0)

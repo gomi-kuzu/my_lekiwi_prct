@@ -1,0 +1,39 @@
+teleop_twist_joy_node:
+  ros__parameters:
+    # 線形移動の軸マッピング（通常は左スティック縦）
+    axis_linear:
+      x: 1  # 前後移動に使用する軸番号
+      y: 0  # 左右移動に使用する軸番号
+    
+    # 角度移動の軸マッピング（通常は左スティック横）
+    axis_angular:
+      yaw: 2  # 回転に使用する軸番号
+    
+    # 線形移動の速度スケール
+    scale_linear:
+      x: 0.1
+      y: 0.1
+    
+    # ターボモード時の線形移動速度スケール
+    scale_linear_turbo:
+      x: 0.2
+      y: 0.2
+    
+    # 角度移動の速度スケール
+    scale_angular:
+      yaw: 0.4
+    
+    # ターボモード時の角度移動速度スケール
+    scale_angular_turbo:
+      yaw: 0.8
+    
+    # イネーブルボタン（このボタンを押しながら操作する必要がある）
+    # ボタン番号は ros2 topic echo /joy で確認できます
+    enable_button: 6  # あなたのコントローラに合わせて変更してください
+    
+    # ターボモードボタン（押すと速度が上がる）
+    enable_turbo_button: 4  # あなたのコントローラに合わせて変更してください
+    
+    # イネーブルボタンを必須とするか
+    # false にすると、ボタンを押さなくてもスティック操作だけで動作します
+    require_enable_button: false
