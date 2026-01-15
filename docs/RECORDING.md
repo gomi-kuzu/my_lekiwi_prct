@@ -51,14 +51,36 @@ ros2 launch lekiwi_ros2_teleop custom_teleop.launch.py
 
 #### ステップ2: データレコーダーノードを起動（別のターミナル）
 
+**新しいデータセットを作成する場合:**
 ```bash
 source install/setup.bash
 ros2 launch lekiwi_ros2_teleop lekiwi_record.launch.py \
     launch_teleop:=false \
-    dataset_repo_id:=username/my_dataset \
+    dataset_repo_id:=john/lekiwi_pick_place \
     single_task:="Pick and place the bottle cap" \
     fps:=30
 ```
+
+**既存のデータセットにエピソードを追加する場合:**
+```bash
+source install/setup.bash
+ros2 launch lekiwi_ros2_teleop lekiwi_record.launch.py \
+    launch_teleop:=false \
+    dataset_repo_id:=john/lekiwi_pick_place \
+    single_task:="Pick and place the bottle cap" \
+    fps:=30 \
+    resume:=true
+```
+
+**重要な注意事項**: 
+- `dataset_repo_id`は**必ず**`username/dataset_name`の形式で指定してください
+  - ✓ 正しい例: `john/lekiwi_pick_place`, `alice/bottle_cap_demo`, `lab/manipulation_001`
+  - ✗ 間違い例: `my_dataset`, `lekiwi_data`, `test` (スラッシュなし)
+- この形式で指定することで、データセットが`~/lerobot_datasets/username/dataset_name/`に正しく保存されます
+- `username`部分は任意の名前（自分の名前やプロジェクト名など）で構いません
+- スラッシュ`/`を含む形式にしないと、LeRobotの可視化ツールやトレーニングスクリプトが正しく動作しません
+- **`resume:=false`** (デフォルト): 新しいデータセットを作成。既存のデータセットがある場合はエラー
+- **`resume:=true`**: 既存のデータセットにエピソードを追加。データセットがない場合はエラー
 
 **注意**: 
 - `launch_teleop:=false`を指定することで、既に起動しているテレオペノードと競合しません。
@@ -157,11 +179,14 @@ python3 src/lekiwi_ros2_teleop/lekiwi_ros2_teleop/upload_dataset.py \
 
 ### データレコーダーノードのパラメータ
 
-- `dataset_repo_id` (string): データセットのリポジトリID（例: `username/dataset_name`）
+- `dataset_repo_id` (string): データセットのリポジトリID（例: `username/dataset_name`）。**必ず`/`を含む形式で指定**
 - `dataset_root` (string): データセット保存先のルートディレクトリ（デフォルト: `~/lerobot_datasets`）
 - `single_task` (string): 記録するタスクの説明（例: "Pick and place the cube"）
 - `fps` (int): 記録フレームレート（デフォルト: 30）
 - `robot_type` (string): ロボットタイプ（デフォルト: `lekiwi_client`）
+- `resume` (bool): 既存データセットへの追記モード（デフォルト: false）
+  - `false`: 新規データセット作成（既存があればエラー）
+  - `true`: 既存データセットにエピソード追加（なければエラー）
 - `use_videos` (bool): 画像を動画としてエンコード（デフォルト: true）
 - `num_image_writer_processes` (int): 画像書き込みプロセス数（デフォルト: 0）
 - `num_image_writer_threads` (int): カメラあたりのスレッド数（デフォルト: 4）
@@ -216,6 +241,31 @@ rm -rf /home/inoma/lerobot_datasets
 
 **注意**: この操作により既存のデータが削除されます。必要なデータは事前にバックアップしてください。
 
+### トレーニング時の KeyError: 'names' エラー
+
+**症状**: Colab等でトレーニングを開始すると`KeyError: 'names'`というエラーが発生する
+
+```
+File "/content/lerobot/src/lerobot/datasets/utils.py", line 723, in dataset_to_policy_features
+    names = ft["names"]
+            ~~^^^^^^^^^
+KeyError: 'names'
+```
+
+**原因**: 
+古いバージョンのデータレコーダーで記録されたデータセットのメタデータに、画像フィーチャーの`names`キーが含まれていない
+
+**解決方法**:
+1. データレコーダーのコードを最新版に更新してください（画像フィーチャーに`names: ["height", "width", "channels"]`が追加されています）
+2. 既存のデータセットを削除し、新しいメタデータで再作成してください：
+```bash
+rm -rf ~/lerobot_datasets/username/my_dataset
+```
+3. データを再記録してください
+
+**代替方法（データを保持したい場合）**:
+既存のデータセットのメタデータファイル`~/lerobot_datasets/username/my_dataset/meta/info.json`を手動で編集し、画像フィーチャーに`"names": ["height", "width", "channels"]`を追加します。
+
 ### データセットに追加記録する場合
 
 既存のデータセットにエピソードを追加したい場合は、データセットディレクトリを削除**しないで**ください。
@@ -233,6 +283,116 @@ rm -rf /home/inoma/lerobot_datasets
 - Hugging Face CLIにログイン: `huggingface-cli login`
 - リポジトリへの書き込み権限があるか確認
 - インターネット接続を確認
+
+### データセット可視化時のエラー
+
+**症状**: `lerobot-dataset-viz`でエピソード2以降を指定すると`IndexError: Invalid key: XXXX is out of bounds for size YYYY`が発生する
+
+**原因**: 
+これはLeRobotの`lerobot-dataset-viz`ツール側のバグです。特定のエピソードを指定した場合、データをフィルタリングした後も累積インデックスでアクセスしようとするため、範囲外エラーが発生します。
+
+**解決方法（回避策）**:
+
+1. **エピソード0のみ可視化する**:
+```bash
+lerobot-dataset-viz \
+    --repo-id username/my_dataset \
+    --root ~/lerobot_datasets \
+    --episode-index 0
+```
+
+2. **全エピソードを含めて可視化** (エピソード指定なし):
+```bash
+# 注意: このオプションは現在のバージョンでサポートされていない可能性があります
+lerobot-dataset-viz \
+    --repo-id username/my_dataset \
+    --root ~/lerobot_datasets
+```
+
+3. **Pythonで直接データを確認**:
+```python
+from pathlib import Path
+from lerobot.datasets.lerobot_dataset import LeRobotDataset
+import matplotlib.pyplot as plt
+
+# データセットをロード
+dataset = LeRobotDataset(
+    repo_id="username/my_dataset",
+    root=str(Path.home() / "lerobot_datasets")
+)
+
+# 特定のエピソードを選択
+episode_index = 2
+episode_data = dataset.select_episodes([episode_index])
+
+print(f"Episode {episode_index}:")
+print(f"  Frames: {len(episode_data)}")
+print(f"  First frame keys: {episode_data[0].keys()}")
+
+# フレームを表示
+frame = episode_data[0]
+if "observation.images.front" in frame:
+    import numpy as np
+    img = np.array(frame["observation.images.front"])
+    plt.imshow(img)
+    plt.title(f"Episode {episode_index} - Frame 0 - Front Camera")
+    plt.show()
+```
+
+4. **データセットの全体を確認**:
+```python
+from pathlib import Path
+from lerobot.datasets.lerobot_dataset import LeRobotDataset
+
+dataset = LeRobotDataset(
+    repo_id="username/my_dataset",
+    root=str(Path.home() / "lerobot_datasets")
+)
+
+print(f"Dataset: {dataset.repo_id}")
+print(f"Total episodes: {dataset.num_episodes}")
+print(f"Total frames: {dataset.num_frames}")
+print(f"FPS: {dataset.fps}")
+
+# 各エピソードの情報を表示
+import pandas as pd
+episodes_df = pd.DataFrame(dataset.meta.episodes)
+print("\nEpisode information:")
+print(episodes_df[['episode_index', 'length', 'dataset_from_index', 'dataset_to_index']])
+```
+
+**注意**: 
+- この問題はデータセット自体の問題ではなく、可視化ツール側のバグです
+- データは正しく保存されており、トレーニングには問題なく使用できます
+- LeRobotの将来のバージョンで修正される可能性があります
+
+### データセットのトレーニングでの使用
+
+データセットは正しく保存されているため、トレーニングには問題なく使用できます：
+
+```bash
+# Colabやローカル環境でのトレーニング例
+lerobot-train \
+    policy=act \
+    env=real_world \
+    dataset.repo_id=username/my_dataset \
+    dataset.root=~/lerobot_datasets
+```
+
+### resumeモードでのエラー
+
+**症状**: `resume:=true`でデータレコーダーを起動すると「Repository Not Found」エラーが発生する
+
+**原因**: 
+Hugging Face Hubへのアクセスを試みているが、ローカルデータセットのみを使用する設定になっていない
+
+**解決方法**:
+最新バージョンのコードを使用していることを確認してください。現在のバージョンでは、resumeモードで自動的にローカルファイルのみを使用します。
+
+### データが記録されない
+- すべての必要なトピックがパブリッシュされているか確認: `ros2 topic list`
+- データレコーダーが警告を出していないか確認
+- カメラトピックの確認: `ros2 topic echo /lekiwi/camera/front/image_raw/compressed --no-arr`
 
 ## 参考リンク
 

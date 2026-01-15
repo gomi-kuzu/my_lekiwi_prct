@@ -47,7 +47,44 @@ if lerobot_path is None:
 if lerobot_path not in sys.path:
     sys.path.append(lerobot_path)
 
+# Monkey-patch get_safe_version to avoid HuggingFace Hub API calls for local datasets
+# This must be done BEFORE importing LeRobotDataset
+from lerobot.datasets import utils as lerobot_utils
+_original_get_safe_version = lerobot_utils.get_safe_version
+
+def _get_safe_version_offline(repo_id: str, version: str):
+    """Return the version without checking HuggingFace Hub.
+    
+    This allows loading local datasets without network access.
+    """
+    return version if isinstance(version, str) else str(version)
+
+# Apply the patch to utils module
+lerobot_utils.get_safe_version = _get_safe_version_offline
+
+# Also patch snapshot_download to avoid HuggingFace Hub access
+from huggingface_hub import snapshot_download as _original_snapshot_download
+
+def _snapshot_download_local(repo_id, *, repo_type='dataset', revision=None, local_dir=None, **kwargs):
+    """Return local directory without attempting to download from Hub."""
+    if local_dir:
+        local_path = Path(local_dir) / repo_id
+        if local_path.exists():
+            return str(local_path)
+        return local_dir
+    return str(Path.home() / '.cache' / 'huggingface' / 'lerobot' / repo_id)
+
+import huggingface_hub
+huggingface_hub.snapshot_download = _snapshot_download_local
+
+# Now import LeRobotDataset (after patching)
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
+
+# Also patch the lerobot_dataset module's global namespace
+import lerobot.datasets.lerobot_dataset as lerobot_dataset_module
+lerobot_dataset_module.get_safe_version = _get_safe_version_offline
+
+# Import other LeRobot components
 from lerobot.datasets.pipeline_features import create_initial_features
 from lerobot.datasets.utils import build_dataset_frame
 from lerobot.datasets.image_writer import safe_stop_image_writer
@@ -77,11 +114,12 @@ class LeKiwiDataRecorder(Node):
         super().__init__('lekiwi_data_recorder')
         
         # Declare parameters
-        self.declare_parameter('dataset_repo_id', 'username/dataset_name')
+        self.declare_parameter('dataset_repo_id', 'your_username/your_dataset_name')
         self.declare_parameter('dataset_root', str(Path.home() / 'lerobot_datasets'))
         self.declare_parameter('single_task', 'Pick and place task')
         self.declare_parameter('fps', 30)
         self.declare_parameter('robot_type', 'lekiwi_client')
+        self.declare_parameter('resume', False)  # Resume recording on existing dataset
         self.declare_parameter('num_image_writer_processes', 0)
         self.declare_parameter('num_image_writer_threads', 4)
         self.declare_parameter('use_videos', True)
@@ -89,12 +127,35 @@ class LeKiwiDataRecorder(Node):
         
         # Get parameters
         self.dataset_repo_id = self.get_parameter('dataset_repo_id').value
+        
+        # Validate dataset_repo_id format (must be in 'username/dataset_name' format)
+        if '/' not in self.dataset_repo_id:
+            raise ValueError(
+                f"Invalid dataset_repo_id: '{self.dataset_repo_id}'. "
+                f"Must be in format 'username/dataset_name' (e.g., 'john/pick_place_data'). "
+                f"This format is required for proper dataset organization and compatibility with LeRobot tools."
+            )
+        
+        username, dataset_name = self.dataset_repo_id.split('/', 1)
+        if not username or not dataset_name:
+            raise ValueError(
+                f"Invalid dataset_repo_id: '{self.dataset_repo_id}'. "
+                f"Both username and dataset_name must be non-empty."
+            )
+        
+        if username in ['your_username', 'username'] or dataset_name in ['your_dataset_name', 'dataset_name']:
+            self.get_logger().warn(
+                f"Using placeholder dataset_repo_id: '{self.dataset_repo_id}'. "
+                f"Please update to a meaningful name (e.g., 'john/lekiwi_pick_place')."
+            )
+        
         dataset_root_param = self.get_parameter('dataset_root').value
         # Expand ~ and convert to absolute path
         self.dataset_root = str(Path(dataset_root_param).expanduser().resolve())
         self.single_task = self.get_parameter('single_task').value
         self.fps = self.get_parameter('fps').value
         self.robot_type = self.get_parameter('robot_type').value
+        self.resume = self.get_parameter('resume').value
         self.num_image_writer_processes = self.get_parameter('num_image_writer_processes').value
         self.num_image_writer_threads = self.get_parameter('num_image_writer_threads').value
         self.use_videos = self.get_parameter('use_videos').value
@@ -180,11 +241,21 @@ class LeKiwiDataRecorder(Node):
         # Create timer for periodic data recording
         self.record_timer = self.create_timer(1.0 / self.fps, self.record_frame_callback)
         
-        self.get_logger().info(f'LeKiwi Data Recorder initialized')
-        self.get_logger().info(f'Dataset: {self.dataset_repo_id}')
+        # Display initialization summary
+        dataset_path = Path(self.dataset_root) / self.dataset_repo_id
+        mode = "RESUME" if self.resume else "NEW"
+        self.get_logger().info(f'LeKiwi Data Recorder initialized [{mode} mode]')
+        self.get_logger().info(f'Dataset repo_id: {self.dataset_repo_id}')
+        self.get_logger().info(f'Dataset location: {dataset_path}')
         self.get_logger().info(f'Task: {self.single_task}')
         self.get_logger().info(f'FPS: {self.fps}')
-        self.get_logger().info('Call ~/start_episode service to begin recording')
+        self.get_logger().info(f'Total episodes: {self.dataset.num_episodes}')
+        self.get_logger().info(f'Use videos: {self.use_videos}')
+        self.get_logger().info('Services:')
+        self.get_logger().info('  - ~/start_episode: Start recording new episode')
+        self.get_logger().info('  - ~/stop_episode: Stop and save current episode')
+        self.get_logger().info('  - ~/save_dataset: Display dataset info')
+        self.get_logger().info('Ready to record. Call ~/start_episode to begin.')
     
     def _initialize_dataset(self):
         """Initialize LeRobot dataset with appropriate features."""
@@ -212,10 +283,12 @@ class LeKiwiDataRecorder(Node):
             "observation.images.front": {
                 "dtype": "video" if self.use_videos else "image",
                 "shape": (480, 640, 3),  # height, width, channels (RGB)
+                "names": ["height", "width", "channels"],
             },
             "observation.images.wrist": {
                 "dtype": "video" if self.use_videos else "image",
                 "shape": (640, 480, 3),  # height, width, channels (RGB) - different resolution
+                "names": ["height", "width", "channels"],
             },
             "action": {
                 "dtype": "float32",
@@ -240,29 +313,68 @@ class LeKiwiDataRecorder(Node):
         
         # Create or load dataset
         dataset_path = Path(self.dataset_root) / self.dataset_repo_id
+        dataset_exists = dataset_path.exists() and (dataset_path / 'meta' / 'info.json').exists()
         
-        # Check if dataset already exists locally
-        if dataset_path.exists() and (dataset_path / 'meta' / 'info.json').exists():
-            # Dataset already exists locally, load it
-            self.get_logger().info(f'Loading existing dataset: {self.dataset_repo_id}')
+        if self.resume:
+            # Resume mode: append to existing dataset
+            if not dataset_exists:
+                raise ValueError(
+                    f'Resume mode enabled but dataset not found at {dataset_path}. '
+                    f'To create a new dataset, set resume:=false'
+                )
+            
+            self.get_logger().info(f'[RESUME MODE] Appending to existing dataset: {self.dataset_repo_id}')
+            self.get_logger().info(f'Dataset path: {dataset_path}')
+            
             try:
+                # Load existing dataset from local files (with patched get_safe_version)
+                # Note: LeRobotDataset expects root to be the dataset directory itself, not the parent
+                dataset_full_path = Path(self.dataset_root) / self.dataset_repo_id
                 self.dataset = LeRobotDataset(
                     repo_id=self.dataset_repo_id,
-                    root=self.dataset_root,
+                    root=str(dataset_full_path),  # Full path to dataset directory
+                    revision='v3.0',  # Use fixed version
+                    batch_encoding_size=self.video_encoding_batch_size,
                 )
-                # Start image writer for existing dataset
+                
+                # Start image writer for recording
                 self.dataset.start_image_writer(
                     num_processes=self.num_image_writer_processes,
                     num_threads=self.num_image_writer_threads,
                 )
-                self.get_logger().info(f'Loaded existing dataset with {self.dataset.num_episodes} episodes')
+                
+                self.get_logger().info(f'✓ Loaded existing dataset with {self.dataset.num_episodes} episodes')
+                self.get_logger().info(f'  Total frames: {self.dataset.num_frames}')
+                self.get_logger().info(f'  FPS: {self.dataset.fps}')
+                self.get_logger().info(f'  Robot type: {self.dataset.meta.robot_type}')
+                
+                # Verify compatibility
+                if self.dataset.fps != self.fps:
+                    self.get_logger().warn(
+                        f'Dataset FPS ({self.dataset.fps}) differs from requested FPS ({self.fps}). '
+                        f'Using dataset FPS to maintain consistency.'
+                    )
+                    self.fps = self.dataset.fps
+                    
             except Exception as load_error:
                 self.get_logger().error(f'Failed to load existing dataset: {load_error}')
+                import traceback
+                self.get_logger().error(f'\nTraceback:\n{traceback.format_exc()}')
                 raise
         else:
+            # New dataset mode: create new (error if already exists)
+            if dataset_exists:
+                raise ValueError(
+                    f'Dataset already exists at {dataset_path}. '
+                    f'To add episodes to existing dataset, use resume:=true. '
+                    f'To create a new dataset, delete the existing one first: rm -rf {dataset_path}'
+                )
             # Create new dataset
             self.get_logger().info(f'Creating new dataset: {self.dataset_repo_id}')
             self.get_logger().info(f'Dataset will be created at: {dataset_path}')
+            self.get_logger().info(f'Robot type: {self.robot_type}')
+            self.get_logger().info(f'FPS: {self.fps}')
+            self.get_logger().info(f'Use videos: {self.use_videos}')
             
             try:
                 self.dataset = LeRobotDataset.create(
@@ -276,15 +388,21 @@ class LeKiwiDataRecorder(Node):
                     image_writer_threads=self.num_image_writer_threads,
                     batch_encoding_size=self.video_encoding_batch_size,
                 )
-                self.get_logger().info(f'Successfully created new dataset: {self.dataset_repo_id}')
-                self.get_logger().info(f'Dataset location: {dataset_path}')
+                self.get_logger().info(f'✓ Successfully created new dataset')
+                self.get_logger().info(f'  Location: {dataset_path}')
+                self.get_logger().info(f'  Repo ID: {self.dataset_repo_id}')
             except Exception as e:
                 self.get_logger().error(f'Failed to create dataset: {e}')
                 self.get_logger().error(f'Dataset root: {self.dataset_root}')
                 self.get_logger().error(f'Dataset repo_id: {self.dataset_repo_id}')
                 self.get_logger().error(f'Dataset path: {dataset_path}')
+                self.get_logger().error(f'\nCommon issues:')
+                self.get_logger().error(f'  1. Ensure dataset_repo_id is in format "username/dataset_name"')
+                self.get_logger().error(f'  2. Check that image resolution matches your camera feeds')
+                self.get_logger().error(f'  3. Verify LEROBOT_PATH environment variable is set correctly')
+                self.get_logger().error(f'  4. If updating features, delete existing dataset directory first')
                 import traceback
-                self.get_logger().error(f'Traceback:\n{traceback.format_exc()}')
+                self.get_logger().error(f'\nFull traceback:\n{traceback.format_exc()}')
                 raise
     
     def joint_state_callback(self, msg: JointState):

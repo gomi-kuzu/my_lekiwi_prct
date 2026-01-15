@@ -73,8 +73,8 @@ def generate_launch_description():
     # Dataset recording arguments
     dataset_repo_id_arg = DeclareLaunchArgument(
         'dataset_repo_id',
-        default_value='username/dataset_name',
-        description='Dataset repository ID (e.g., username/dataset_name)'
+        default_value='your_username/your_dataset_name',
+        description='Dataset repository ID in format "username/dataset_name" (e.g., john/lekiwi_pick_place). Required format for LeRobot compatibility.'
     )
     
     dataset_root_arg = DeclareLaunchArgument(
@@ -93,6 +93,12 @@ def generate_launch_description():
         'fps',
         default_value='30',
         description='Recording frames per second'
+    )
+    
+    resume_arg = DeclareLaunchArgument(
+        'resume',
+        default_value='false',
+        description='Resume recording on existing dataset (true/false). Set to true to add episodes to existing dataset.'
     )
     
     use_videos_arg = DeclareLaunchArgument(
@@ -145,6 +151,7 @@ def generate_launch_description():
             'dataset_root': LaunchConfiguration('dataset_root'),
             'single_task': LaunchConfiguration('single_task'),
             'fps': LaunchConfiguration('fps'),
+            'resume': LaunchConfiguration('resume'),
             'use_videos': LaunchConfiguration('use_videos'),
             'num_image_writer_processes': LaunchConfiguration('num_image_writer_processes'),
             'num_image_writer_threads': LaunchConfiguration('num_image_writer_threads'),
@@ -163,6 +170,7 @@ def generate_launch_description():
         dataset_root_arg,
         single_task_arg,
         fps_arg,
+        resume_arg,
         use_videos_arg,
         num_image_writer_processes_arg,
         num_image_writer_threads_arg,
