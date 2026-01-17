@@ -75,16 +75,12 @@ ros2 launch lekiwi_ros2_teleop lekiwi_policy.launch.py \
 ### ステップ3: 推論を開始
 
 サービスコールで推論を開始：
-control_frequency`: 制御ループの周波数（デフォルト: `50.0` Hz）
-- `device`: 推論デバイス（デフォルト: `cuda`、他に `cpu`, `mps`）
-- `use_amp`: 自動混合精度を使用（デフォルト: `fals
 
 ```bash
-ros2 launch lekiwi_ros2_teleop lekiwi_policy.launch.py \
-    policy_path:=/path/to/trained/model \
-    dataset_repo_id:=<username>/env_<dataset_name> \
-    single_task:="Pick and place the cube"
+ros2 service call /lekiwi/policy/start std_srvs/srv/Trigger
 ```
+
+## 使用方法
 
 ### パラメータ詳細
 
@@ -96,20 +92,10 @@ ros2 launch lekiwi_ros2_teleop lekiwi_policy.launch.py \
   - 例: `gomi-kuzu/lekiwi_pick_place`
 
 #### オプションパラメータ
-（分散システム）
 
-```bash
-# ラズベリーパイ上
-ros2 launch lekiwi_ros2_teleop custom_teleop.launch.py
-
-# デスクトップPC上
-ros2 launch lekiwi_ros2_teleop lekiwi_policy.launch.py \
-    policy_path:=~/outputs/train/2025-01-15/14-30-00/checkpoints/last \
-    dataset_repo_id:=gomi-kuzu/lekiwi_pick_place \
-    single_task:="Pick the blue cube and place it in the box"
-
-# 推論開始
-ros2 service call /lekiwi/policy/start std_srvs/srv/Trigger
+- `control_frequency`: 制御ループの周波数（デフォルト: `50.0` Hz）
+- `device`: 推論デバイス（デフォルト: `cuda`、他に `cpu`, `mps`）
+- `use_amp`: 自動混合精度を使用（デフォルト: `false`）
 - `use_degrees`: 角度を度数法で扱う（デフォルト: `false`）
 - `rotate_front_camera`: フロントカメラを180度回転（デフォルト: `true`）
 
@@ -127,14 +113,25 @@ ros2 service call /lekiwi/policy/stop std_srvs/srv/Trigger
 
 ### 実行例
 
-#### 例1: 基本的な推論
+#### 例1: 基本的な推論（分散システム）
 
 ```bash
+# ラズベリーパイ上
+ros2 launch lekiwi_ros2_teleop custom_teleop.launch.py
+
+# デスクトップPC上
 ros2 launch lekiwi_ros2_teleop lekiwi_policy.launch.py \
     policy_path:=~/outputs/train/2025-01-15/14-30-00/checkpoints/last \
     dataset_repo_id:=gomi-kuzu/lekiwi_pick_place \
     single_task:="Pick the blue cube and place it in the box"
+
+# 推論開始
+ros2 service call /lekiwi/policy/start std_srvs/srv/Trigger
 ```
+
+#### 例2: CPUで推論
+
+```bash
 # デスクトップPC上
 ros2 launch lekiwi_ros2_teleop lekiwi_policy.launch.py \
     policy_path:=~/outputs/train/2025-01-15/14-30-00/checkpoints/last \
@@ -150,29 +147,33 @@ ros2 launch lekiwi_ros2_teleop lekiwi_policy.launch.py \
 
 # デスクトップPC上で環境変数を設定
 export ROS_DOMAIN_ID=42  # 同じドメインIDを使用
-export ROS_LOCAL（デスクトップPC → ラズベリーパイ）
+export ROS_LOCALHOST_ONLY=0
+
+# 通常通り起動
+ros2 launch lekiwi_ros2_teleop lekiwi_policy.launch.py \
+    policy_path:=~/outputs/train/2025-01-15/14-30-00/checkpoints/last \
+    dataset_repo_id:=gomi-kuzu/lekiwi_pick_place
+```
+
+## パブリッシュされるトピック（デスクトップPC → ラズベリーパイ）
 
 - `/lekiwi/cmd_vel` (geometry_msgs/Twist): ベース速度コマンド
 - `/lekiwi/arm_joint_commands` (sensor_msgs/JointState): アーム関節位置コマンド
 
 ## サブスクライブするトピック（ラズベリーパイ → デスクトップPC）
 
-export ROS_LOCALHOST_ONLY=0
-
-# 通常通り起動
-ros2 launch lekiwi_ros2_teleop lekiwi_policy.launch.py ...
-ros2 launch lekiwi_ros2_teleop lekiwi_policy.launch.py \
-    policy_path:=~/outputs/train/2025-01-15/14-30-00/checkpoints/last \
-    dataset_repo_id:=gomi-kuzu/lekiwi_pick_place \
-    robot_port:=/dev/ttyUSB0
-```
-
-## パブリッシュされるトピック
-
-- `/lekiwi/cmd_vel` (geometry_msgs/Twist): ベース速度コマンド
-- `/lekiwi/arm_joint_commands` (sensor_msgs/JointState): アーム関節位置コマンド
 - `/lekiwi/joint_states` (sensor_msgs/JointState): 現在のロボット状態
-- `/観測データが受信できない
+- `/lekiwi/camera/front/image_raw/compressed` (sensor_msgs/CompressedImage): フロントカメラ画像
+- `/lekiwi/camera/wrist/image_raw/compressed` (sensor_msgs/CompressedImage): リストカメラ画像
+
+## サービス
+
+- `/lekiwi/policy/start` (std_srvs/Trigger): 推論開始
+- `/lekiwi/policy/stop` (std_srvs/Trigger): 推論停止
+
+## トラブルシューティング
+
+### 観測データが受信できない
 
 - ラズベリーパイ上で`lekiwi_teleop_node`が起動しているか確認
 - トピックが正しくパブリッシュされているか確認:
@@ -186,7 +187,15 @@ ros2 launch lekiwi_ros2_teleop lekiwi_policy.launch.py \
 
 ### ロボットに接続できない
 
-**注意**: 推論ノードはロボットに直接接続しません。ラズベリーパイ側の問題です。が、分散システム向けに修正されています：
+**注意**: 推論ノードはロボットに直接接続しません。ラズベリーパイ側の問題です。
+
+- `lekiwi_teleop_node`がラズベリーパイで起動しているか確認
+- ロボットの電源が入っているか確認
+- ポート設定が正しいか確認（ラズベリーパイ側）
+
+## アーキテクチャの詳細
+
+このノードは分散システム向けに設計されています：
 
 1. **観測取得**: ROS2トピックから観測データを受信（`/lekiwi/joint_states`, カメラ画像）
 2. **データ変換**: `build_dataset_frame()`で観測をデータセット形式に変換
@@ -198,44 +207,20 @@ ros2 launch lekiwi_ros2_teleop lekiwi_policy.launch.py \
 - **GPU活用**: デスクトップPCのGPUで高速推論
 - **リアルタイム性**: ロボット制御は軽量なラズベリーパイで実行
 - **柔軟性**: 推論ノードとロボットを独立して開発・テスト可能
-- **拡張性**: 複数の推論ノードや可視化ノードを簡単に追加可能`（ラズベリーパイ側）論開始
-- `/lekiwi/policy/stop` (std_srvs/Trigger): 推論停止
-
-## トラブルシューティング
-
-### モデルが読み込めない
-
-- `policy_path`が正しいか確認してください
-- モデルディレクトリに `config.json` や `pytorch_model.bin` などが含まれているか確認してください
-
-### データセットが見つからない
-
-- `dataset_repo_id`と`dataset_root`が正しいか確認してください
-- データセットディレクトリ構造を確認: `{dataset_root}/{repo_id}/`
-
-### ロボットに接続できない
-
-- `robot_port`が正しいか確認してください
-- ロボットの電源が入っているか確認してください
-- USBケーブルが接続されているか確認してください
-- ポートのアクセス権限を確認: `sudo chmod 666 /dev/ttyACM0`
-
-### CUDA out of memory エラー
-
-- `device:=cpu`を試してください
-- より小さいバッチサイズのモデルを使用してください
+- **拡張性**: 複数の推論ノードや可視化ノードを簡単に追加可能
 
 ## 実装の詳細
 
 このノードは`lerobot-record`コマンドの`--policy.path`オプション機能を参考に実装されています：
 
-1. **観測取得**: `robot.get_observation()`でロボットの状態とカメラ画像を取得
+1. **観測取得**: ROS2トピックからロボットの状態とカメラ画像を取得
 2. **データ変換**: `build_dataset_frame()`で観測をデータセット形式に変換
 3. **行動予測**: `predict_action()`で方策モデルから行動を予測
-4. **行動送信**: `robot.send_action()`でロボットに行動を送信
+4. **行動送信**: ROS2トピックでロボットに行動を送信
 
 ## 参考
 
 - 元のスクリプト: `~/study/lerobot/src/lerobot/scripts/lerobot_record.py`
-- データ記録ノード: [lekiwi_data_recorder.py](lekiwi_ros2_teleop/lekiwi_data_recorder.py)
-- テレオペノード: [lekiwi_teleop_node.py](lekiwi_ros2_teleop/lekiwi_teleop_node.py)
+- データ記録ノード: [lekiwi_data_recorder.py](../lekiwi_ros2_teleop/lekiwi_data_recorder.py)
+- テレオペノード: [lekiwi_teleop_node.py](../lekiwi_ros2_teleop/lekiwi_teleop_node.py)
+
