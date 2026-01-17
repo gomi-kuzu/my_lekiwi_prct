@@ -24,6 +24,7 @@ The robot control is handled by lekiwi_teleop_node running on the Raspberry Pi.
 Based on lerobot_record.py's policy inference functionality.
 """
 
+import json
 import os
 import sys
 import time
@@ -126,9 +127,10 @@ class LeKiwiPolicyNode(Node):
         self.declare_parameter('use_amp', False)
         
         # Get parameters
-        self.policy_path = self.get_parameter('policy_path').value
+        policy_path_raw = self.get_parameter('policy_path').value
+        self.policy_path = str(Path(policy_path_raw).expanduser().resolve())
         self.dataset_repo_id = self.get_parameter('dataset_repo_id').value
-        self.dataset_root = Path(self.get_parameter('dataset_root').value)
+        self.dataset_root = Path(self.get_parameter('dataset_root').value).expanduser()
         self.control_frequency = self.get_parameter('control_frequency').value
         self.single_task = self.get_parameter('single_task').value
         device = self.get_parameter('device').value
@@ -260,8 +262,33 @@ class LeKiwiPolicyNode(Node):
         self.get_logger().info(f'Loading policy from: {self.policy_path}')
         
         try:
-            # Load policy configuration
-            policy_cfg = PreTrainedConfig.from_pretrained(self.policy_path)
+            # Load config.json and remove deprecated fields
+            config_path = Path(self.policy_path) / 'config.json'
+            with open(config_path, 'r') as f:
+                config_dict = json.load(f)
+            
+            # Remove deprecated fields that are not compatible with current LeRobot
+            deprecated_fields = ['use_peft', 'push_to_hub', 'repo_id', 'private', 'tags', 'license']
+            removed_fields = []
+            for field in deprecated_fields:
+                if field in config_dict:
+                    config_dict.pop(field)
+                    removed_fields.append(field)
+            
+            if removed_fields:
+                self.get_logger().warn(f'Removed deprecated config fields: {removed_fields}')
+            
+            # Create a temporary config file without deprecated fields
+            import tempfile
+            with tempfile.TemporaryDirectory() as tmpdir:
+                tmp_config_path = Path(tmpdir) / 'config.json'
+                with open(tmp_config_path, 'w') as f:
+                    json.dump(config_dict, f, indent=2)
+                
+                # Load config using from_pretrained (which handles type-specific configs like ACTConfig)
+                policy_cfg = PreTrainedConfig.from_pretrained(tmpdir)
+            
+            # Set the correct pretrained_path to the original model directory
             policy_cfg.pretrained_path = self.policy_path
             
             # Override device settings

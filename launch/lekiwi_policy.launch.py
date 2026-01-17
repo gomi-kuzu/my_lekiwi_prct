@@ -88,6 +88,24 @@ def generate_launch_description():
         description='Use automatic mixed precision for inference'
     )
     
+    robot_port_arg = DeclareLaunchArgument(
+        'robot_port',
+        default_value='',
+        description='Robot port (not used in distributed mode, kept for compatibility)'
+    )
+    
+    use_degrees_arg = DeclareLaunchArgument(
+        'use_degrees',
+        default_value='false',
+        description='Use degrees instead of radians for joint angles'
+    )
+    
+    rotate_front_camera_arg = DeclareLaunchArgument(
+        'rotate_front_camera',
+        default_value='true',
+        description='Rotate front camera image by 180 degrees'
+    )
+    
     # Create policy node
     policy_node = Node(
         package='lekiwi_ros2_teleop',
@@ -113,9 +131,14 @@ def generate_launch_description():
         # Arguments
         policy_path_arg,
         dataset_repo_id_arg,
-        dataspolicy_path': LaunchConfiguration('policy_path'),
-            'dataset_repo_id': LaunchConfiguration('dataset_repo_id'),
-        control_frequency
+        dataset_root_arg,
+        single_task_arg,
+        control_frequency_arg,
+        device_arg,
+        use_amp_arg,
+        robot_port_arg,
+        use_degrees_arg,
+        rotate_front_camera_arg,
         # Nodes
         policy_node,
     ])
