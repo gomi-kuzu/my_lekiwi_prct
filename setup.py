@@ -33,6 +33,7 @@ setup(
             'lekiwi_ros2_teleop_client = lekiwi_ros2_teleop.lekiwi_ros2_teleop_client:main',
             'lekiwi_data_recorder = lekiwi_ros2_teleop.lekiwi_data_recorder:main',
             'lekiwi_upload_dataset = lekiwi_ros2_teleop.upload_dataset:main',
+            'lekiwi_policy_node = lekiwi_ros2_teleop.lekiwi_policy_node:main',
         ],
     },
 )

@@ -1,0 +1,472 @@
+#!/usr/bin/env python3
+
+# Copyright 2024 The HuggingFace Inc. team. All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""
+ROS2 Policy Inference Node for LeKiwi Robot
+
+This node loads a trained policy model and performs inference to control the robot.
+It runs on a desktop PC with GPU and communicates with the robot via ROS2 topics.
+The robot control is handled by lekiwi_teleop_node running on the Raspberry Pi.
+
+Based on lerobot_record.py's policy inference functionality.
+"""
+
+import os
+import sys
+import time
+from pathlib import Path
+from typing import Optional, Dict, Any
+
+import cv2
+import numpy as np
+import rclpy
+from rclpy.node import Node
+from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
+from geometry_msgs.msg import Twist
+from sensor_msgs.msg import JointState, CompressedImage
+from std_msgs.msg import String
+from std_srvs.srv import Trigger, SetBool
+
+# Import LeRobot components
+lerobot_path = os.environ.get('LEROBOT_PATH')
+if lerobot_path is None:
+    raise EnvironmentError(
+        "LEROBOT_PATH environment variable is not set. "
+        "Please set it to the path of your LeRobot installation's src directory. "
+        "Example: export LEROBOT_PATH='/path/to/lerobot/src'"
+    )
+if lerobot_path not in sys.path:
+    sys.path.append(lerobot_path)
+
+# Monkey-patch to avoid HuggingFace Hub API calls
+from lerobot.datasets import utils as lerobot_utils
+_original_get_safe_version = lerobot_utils.get_safe_version
+
+def _get_safe_version_offline(repo_id: str, version: str):
+    """Return the version without checking HuggingFace Hub."""
+    return version if isinstance(version, str) else str(version)
+
+lerobot_utils.get_safe_version = _get_safe_version_offline
+
+from huggingface_hub import snapshot_download as _original_snapshot_download
+
+def _snapshot_download_local(repo_id, *, repo_type='dataset', revision=None, local_dir=None, **kwargs):
+    """Return local directory without attempting to download from Hub."""
+    if local_dir:
+        local_path = Path(local_dir) / repo_id
+        if local_path.exists():
+            return str(local_path)
+        return local_dir
+    return str(Path.home() / '.cache' / 'huggingface' / 'lerobot' / repo_id)
+
+import huggingface_hub
+huggingface_hub.snapshot_download = _snapshot_download_local
+
+# Import LeRobot classes
+from lerobot.datasets.lerobot_dataset import LeRobotDataset
+import lerobot.datasets.lerobot_dataset as lerobot_dataset_module
+lerobot_dataset_module.get_safe_version = _get_safe_version_offline
+
+from lerobot.configs.policies import PreTrainedConfig
+from lerobot.policies.factory import make_policy, make_pre_post_processors
+from lerobot.policies.utils import make_robot_action
+from lerobot.processor import PolicyProcessorPipeline, RobotAction, RobotObservation
+from lerobot.processor.rename_processor import rename_stats
+from lerobot.datasets.utils import build_dataset_frame
+from lerobot.utils.constants import ACTION, OBS_STR
+from lerobot.utils.utils import get_safe_torch_device
+from lerobot.utils.control_utils import predict_action
+
+
+class LeKiwiPolicyNode(Node):
+    """
+    ROS2 Node for LeKiwi robot policy inference.
+    
+    This node runs on a desktop PC with GPU and communicates with the robot
+    via ROS2 topics. It subscribes to observations from lekiwi_teleop_node
+    and publishes action commands.
+    
+    Subscribes to:
+        - /lekiwi/joint_states (sensor_msgs/JointState): Current robot state
+        - /lekiwi/camera/front/image_raw/compressed: Front camera images
+        - /lekiwi/camera/wrist/image_raw/compressed: Wrist camera images
+    
+    Publishes:
+        - /lekiwi/cmd_vel (geometry_msgs/Twist): Base velocity commands
+        - /lekiwi/arm_joint_commands (sensor_msgs/JointState): Arm joint commands
+    
+    Services:
+        - /lekiwi/policy/start (std_srvs/Trigger): Start policy inference
+        - /lekiwi/policy/stop (std_srvs/Trigger): Stop policy inference
+    """
+    
+    def __init__(self):
+        super().__init__('lekiwi_policy_node')
+        
+        # Declare parameters
+        self.declare_parameter('policy_path', '')
+        self.declare_parameter('dataset_repo_id', '')
+        self.declare_parameter('dataset_root', str(Path.home() / 'lerobot_datasets'))
+        self.declare_parameter('control_frequency', 50.0)
+        self.declare_parameter('single_task', '')
+        self.declare_parameter('device', 'cuda')
+        self.declare_parameter('use_amp', False)
+        
+        # Get parameters
+        self.policy_path = self.get_parameter('policy_path').value
+        self.dataset_repo_id = self.get_parameter('dataset_repo_id').value
+        self.dataset_root = Path(self.get_parameter('dataset_root').value)
+        self.control_frequency = self.get_parameter('control_frequency').value
+        self.single_task = self.get_parameter('single_task').value
+        device = self.get_parameter('device').value
+        use_amp = self.get_parameter('use_amp').value
+        
+        # Validate parameters
+        if not self.policy_path:
+            self.get_logger().error('policy_path parameter is required!')
+            raise ValueError('policy_path parameter must be set')
+        
+        if not self.dataset_repo_id:
+            self.get_logger().error('dataset_repo_id parameter is required!')
+            raise ValueError('dataset_repo_id parameter must be set')
+        
+        # State variables
+        self.is_running = False
+        self.policy = None
+        self.preprocessor = None
+        self.postprocessor = None
+        self.dataset = None
+        
+        # Received observations from ROS topics
+        self.latest_joint_state: Optional[JointState] = None
+        self.latest_front_image: Optional[np.ndarray] = None
+        self.latest_wrist_image: Optional[np.ndarray] = None
+        self.observation_ready = False
+        
+        # QoS settings
+        qos_profile = QoSProfile(
+            reliability=ReliabilityPolicy.RELIABLE,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=10
+        )
+        
+        # Publishers (commands to robot)
+        self.cmd_vel_pub = self.create_publisher(
+            Twist, '/lekiwi/cmd_vel', qos_profile
+        )
+        self.arm_joint_cmd_pub = self.create_publisher(
+            JointState, '/lekiwi/arm_joint_commands', qos_profile
+        )
+        
+        # Subscribers (observations from robot)
+        self.joint_state_sub = self.create_subscription(
+            JointState, '/lekiwi/joint_states', self.joint_state_callback, qos_profile
+        )
+        self.front_camera_sub = self.create_subscription(
+            CompressedImage, '/lekiwi/camera/front/image_raw/compressed', 
+            self.front_camera_callback, qos_profile
+        )
+        self.wrist_camera_sub = self.create_subscription(
+            CompressedImage, '/lekiwi/camera/wrist/image_raw/compressed',
+            self.wrist_camera_callback, qos_profile
+        )
+        
+        # Services
+        self.start_srv = self.create_service(
+            Trigger, '/lekiwi/policy/start', self.start_callback
+        )
+        self.stop_srv = self.create_service(
+            Trigger, '/lekiwi/policy/stop', self.stop_callback
+        )
+        
+        # Initialize components
+        self.get_logger().info('Initializing policy node...')
+        self._load_dataset()
+        self._load_policy()
+        
+        self.get_logger().info('LeKiwi Policy Node initialized successfully!')
+        self.get_logger().info(f'Policy path: {self.policy_path}')
+        self.get_logger().info(f'Dataset: {self.dataset_repo_id}')
+        self.get_logger().info(f'Task: {self.single_task}')
+        self.get_logger().info('Waiting for observations from /lekiwi/joint_states and camera topics...')
+    
+    def joint_state_callback(self, msg: JointState):
+        """Callback for receiving joint states from the robot."""
+        self.latest_joint_state = msg
+        self._check_observation_ready()
+    
+    def front_camera_callback(self, msg: CompressedImage):
+        """Callback for receiving front camera images."""
+        try:
+            # Decode JPEG image
+            np_arr = np.frombuffer(msg.data, np.uint8)
+            image_bgr = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+            # Convert BGR to RGB (LeRobot expects RGB)
+            self.latest_front_image = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
+            self._check_observation_ready()
+        except Exception as e:
+            self.get_logger().warn(f'Failed to decode front camera image: {e}')
+    
+    def wrist_camera_callback(self, msg: CompressedImage):
+        """Callback for receiving wrist camera images."""
+        try:
+            # Decode JPEG image
+            np_arr = np.frombuffer(msg.data, np.uint8)
+            image_bgr = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+            # Convert BGR to RGB (LeRobot expects RGB)
+            self.latest_wrist_image = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
+            self._check_observation_ready()
+        except Exception as e:
+            self.get_logger().warn(f'Failed to decode wrist camera image: {e}')
+    
+    def _check_observation_ready(self):
+        """Check if all observation data is available."""
+        if (self.latest_joint_state is not None and 
+            self.latest_front_image is not None and 
+            self.latest_wrist_image is not None):
+            if not self.observation_ready:
+                self.get_logger().info('All observations received. Ready for inference.')
+            self.observation_ready = True
+    
+    def _load_dataset(self):
+        """Load the dataset to get metadata and features."""
+        self.get_logger().info(f'Loading dataset: {self.dataset_repo_id}')
+        
+        try:
+            self.dataset = LeRobotDataset(
+                self.dataset_repo_id,
+                root=str(self.dataset_root),
+            )
+            self.get_logger().info(f'Dataset loaded: {len(self.dataset)} frames')
+        except Exception as e:
+            self.get_logger().error(f'Failed to load dataset: {e}')
+            raise
+    
+    def _load_policy(self):
+        """Load the pretrained policy and processors."""
+        self.get_logger().info(f'Loading policy from: {self.policy_path}')
+        
+        try:
+            # Load policy configuration
+            policy_cfg = PreTrainedConfig.from_pretrained(self.policy_path)
+            policy_cfg.pretrained_path = self.policy_path
+            
+            # Override device settings
+            policy_cfg.device = self.get_parameter('device').value
+            policy_cfg.use_amp = self.get_parameter('use_amp').value
+            
+            # Create policy
+            self.policy = make_policy(policy_cfg, ds_meta=self.dataset.meta)
+            
+            # Create preprocessor and postprocessor
+            self.preprocessor, self.postprocessor = make_pre_post_processors(
+                policy_cfg=policy_cfg,
+                pretrained_path=self.policy_path,
+                dataset_stats=self.dataset.meta.stats,
+                preprocessor_overrides={
+                    "device_processor": {"device": policy_cfg.device},
+                },
+            )
+            
+            self.get_logger().info('Policy loaded successfully!')
+            
+        except Exception as e:
+            self.get_logger().error(f'Failed to load policy: {e}')
+            raise
+    
+    def start_callback(self, request, response):
+        """Start policy inference."""
+        if self.is_running:
+            response.success = False
+            response.message = 'Policy inference already running'
+            return response
+        
+        self.get_logger().info('Starting policy inference...')
+        self.is_running = True
+        
+        # Reset policy and processors
+        self.policy.reset()
+        self.preprocessor.reset()
+        self.postprocessor.reset()
+        
+        # Create control timer
+        control_period = 1.0 / self.control_frequency
+        self.control_timer = self.create_timer(control_period, self.control_loop)
+        
+        response.success = True
+        response.message = 'Policy inference started'
+        return response
+    
+    def stop_callback(self, request, response):
+        """Stop policy inference."""
+        if not self.is_running:
+            response.success = False
+            response.message = 'Policy inference not running'
+            return response
+        
+        self.get_logger().info('Stopping policy inference...')
+        self.is_running = False
+        
+        # Destroy control timer
+        if hasattr(self, 'control_timer'):
+            self.control_timer.cancel()
+            self.destroy_timer(self.control_timer)
+        
+        response.success = True
+        response.message = 'Policy inference stopped'
+        return response
+    
+    def control_loop(self):
+        """Main control loop - get observation from ROS topics, predict action, publish commands."""
+        if not self.is_running:
+            return
+        
+        # Check if observations are available
+        if not self.observation_ready:
+            self.get_logger().warn('Observations not ready yet. Waiting...', throttle_duration_sec=5.0)
+            return
+        
+        try:
+            # Build observation from ROS topic data
+            obs = self._build_observation_from_topics()
+            
+            # Build observation frame for policy
+            observation_frame = build_dataset_frame(
+                self.dataset.features, 
+                obs, 
+                prefix=OBS_STR
+            )
+            
+            # Predict action using policy
+            action_values = predict_action(
+                observation=observation_frame,
+                policy=self.policy,
+                device=get_safe_torch_device(self.policy.config.device),
+                preprocessor=self.preprocessor,
+                postprocessor=self.postprocessor,
+                use_amp=self.policy.config.use_amp,
+                task=self.single_task,
+                robot_type='lekiwi',  # Robot type for LeKiwi
+            )
+            
+            # Convert to robot action
+            robot_action = make_robot_action(action_values, self.dataset.features)
+            
+            # Publish action commands via ROS topics
+            self._publish_commands(robot_action)
+            
+        except Exception as e:
+            self.get_logger().error(f'Error in control loop: {e}')
+            import traceback
+            self.get_logger().error(traceback.format_exc())
+            self.is_running = False
+            if hasattr(self, 'control_timer'):
+                self.control_timer.cancel()
+    
+    def _build_observation_from_topics(self) -> RobotObservation:
+        """Build observation dictionary from ROS topic data."""
+        obs = {}
+        
+        # Add joint states
+        if self.latest_joint_state is not None:
+            # Arm positions (expected order from lekiwi_teleop_node)
+            if len(self.latest_joint_state.position) >= 6:
+                obs['arm_shoulder_pan.pos'] = self.latest_joint_state.position[0]
+                obs['arm_shoulder_lift.pos'] = self.latest_joint_state.position[1]
+                obs['arm_elbow_flex.pos'] = self.latest_joint_state.position[2]
+                obs['arm_wrist_flex.pos'] = self.latest_joint_state.position[3]
+                obs['arm_wrist_roll.pos'] = self.latest_joint_state.position[4]
+                obs['arm_gripper.pos'] = self.latest_joint_state.position[5]
+            
+            # Base velocities
+            if len(self.latest_joint_state.velocity) >= 3:
+                obs['x.vel'] = self.latest_joint_state.velocity[0]
+                obs['y.vel'] = self.latest_joint_state.velocity[1]
+                obs['theta.vel'] = np.degrees(self.latest_joint_state.velocity[2])  # rad/s to deg/s
+        
+        # Add camera images (already in RGB format from callbacks)
+        if self.latest_front_image is not None:
+            obs['observation.image.front'] = self.latest_front_image
+        
+        if self.latest_wrist_image is not None:
+            obs['observation.image.wrist'] = self.latest_wrist_image
+        
+        return obs
+    
+    def _publish_commands(self, action: RobotAction):
+        """Publish action commands to ROS topics."""
+        timestamp = self.get_clock().now().to_msg()
+        
+        # Publish arm commands
+        arm_target_pos = action.get('arm_target_position')
+        if arm_target_pos is not None:
+            arm_cmd = JointState()
+            arm_cmd.header.stamp = timestamp
+            arm_cmd.header.frame_id = 'base_link'
+            arm_cmd.name = ['joint_1', 'joint_2', 'joint_3', 'joint_4', 'joint_5', 'gripper']
+            arm_cmd.position = arm_target_pos.tolist() if hasattr(arm_target_pos, 'tolist') else list(arm_target_pos)
+            
+            self.arm_joint_cmd_pub.publish(arm_cmd)
+        
+        # Publish base commands
+        base_linear_vel = action.get('base_linear_velocity')
+        base_angular_vel = action.get('base_angular_velocity')
+        
+        if base_linear_vel is not None and base_angular_vel is not None:
+            cmd_vel = Twist()
+            
+            if isinstance(base_linear_vel, (list, tuple, np.ndarray)):
+                cmd_vel.linear.x = float(base_linear_vel[0])
+            else:
+                cmd_vel.linear.x = float(base_linear_vel)
+            
+            if isinstance(base_angular_vel, (list, tuple, np.ndarray)):
+                cmd_vel.angular.z = float(base_angular_vel[0])
+            else:
+                cmd_vel.angular.z = float(base_angular_vel)
+            
+            self.cmd_vel_pub.publish(cmd_vel)
+    
+    def destroy_node(self):
+        """Clean up resources."""
+        self.get_logger().info('Shutting down policy node...')
+        
+        if self.is_running:
+            self.is_running = False
+            if hasattr(self, 'control_timer'):
+                self.control_timer.cancel()
+        
+        super().destroy_node()
+
+
+def main(args=None):
+    rclpy.init(args=args)
+    
+    try:
+        node = LeKiwiPolicyNode()
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    except Exception as e:
+        print(f'Error: {e}')
+    finally:
+        if 'node' in locals():
+            node.destroy_node()
+        rclpy.shutdown()
+
+
+if __name__ == '__main__':
+    main()
