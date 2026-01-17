@@ -82,7 +82,7 @@ control_frequency`: 制御ループの周波数（デフォルト: `50.0` Hz）
 ```bash
 ros2 launch lekiwi_ros2_teleop lekiwi_policy.launch.py \
     policy_path:=/path/to/trained/model \
-    dataset_repo_id:=username/dataset_name \
+    dataset_repo_id:=<username>/env_<dataset_name> \
     single_task:="Pick and place the cube"
 ```
 
