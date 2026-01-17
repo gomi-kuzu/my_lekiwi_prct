@@ -253,6 +253,12 @@ class LeKiwiPolicyNode(Node):
                 root=str(self.dataset_root),
             )
             self.get_logger().info(f'Dataset loaded: {len(self.dataset)} frames')
+            
+            # Log expected feature names for debugging
+            if 'observation.state' in self.dataset.features:
+                state_names = self.dataset.features['observation.state'].get('names', [])
+                self.get_logger().info(f'Expected observation.state names: {state_names}')
+            
         except Exception as e:
             self.get_logger().error(f'Failed to load dataset: {e}')
             raise
@@ -367,8 +373,12 @@ class LeKiwiPolicyNode(Node):
             return
         
         try:
+            self.get_logger().debug('Control loop: building observation...', throttle_duration_sec=1.0)
+            
             # Build observation from ROS topic data
             obs = self._build_observation_from_topics()
+            
+            self.get_logger().debug('Control loop: building observation frame...', throttle_duration_sec=1.0)
             
             # Build observation frame for policy
             observation_frame = build_dataset_frame(
@@ -376,6 +386,8 @@ class LeKiwiPolicyNode(Node):
                 obs, 
                 prefix=OBS_STR
             )
+            
+            self.get_logger().debug('Control loop: predicting action...', throttle_duration_sec=1.0)
             
             # Predict action using policy
             action_values = predict_action(
@@ -389,8 +401,15 @@ class LeKiwiPolicyNode(Node):
                 robot_type='lekiwi',  # Robot type for LeKiwi
             )
             
+            self.get_logger().info(f'Predicted action: {action_values}', throttle_duration_sec=1.0)
+            
             # Convert to robot action
             robot_action = make_robot_action(action_values, self.dataset.features)
+            
+            self.get_logger().info(f'Robot action keys: {robot_action.keys() if isinstance(robot_action, dict) else type(robot_action)}', throttle_duration_sec=1.0)
+            self.get_logger().info(f'Robot action: {robot_action}', throttle_duration_sec=1.0)
+            
+            self.get_logger().debug('Control loop: publishing commands...', throttle_duration_sec=1.0)
             
             # Publish action commands via ROS topics
             self._publish_commands(robot_action)
@@ -404,32 +423,59 @@ class LeKiwiPolicyNode(Node):
                 self.control_timer.cancel()
     
     def _build_observation_from_topics(self) -> RobotObservation:
-        """Build observation dictionary from ROS topic data."""
+        """Build observation dictionary from ROS topic data.
+        
+        Matches the format used in lekiwi_data_recorder.py:
+        - arm_joint_0 ~ arm_joint_5 (6 joints, even though physical arm has only 5)
+        - gripper_position
+        - base_linear_x/y/z
+        - base_angular_x/y/z
+        Total: 13 dimensions
+        """
         obs = {}
         
-        # Add joint states
-        if self.latest_joint_state is not None:
-            # Arm positions (expected order from lekiwi_teleop_node)
-            if len(self.latest_joint_state.position) >= 6:
-                obs['arm_shoulder_pan.pos'] = self.latest_joint_state.position[0]
-                obs['arm_shoulder_lift.pos'] = self.latest_joint_state.position[1]
-                obs['arm_elbow_flex.pos'] = self.latest_joint_state.position[2]
-                obs['arm_wrist_flex.pos'] = self.latest_joint_state.position[3]
-                obs['arm_wrist_roll.pos'] = self.latest_joint_state.position[4]
-                obs['arm_gripper.pos'] = self.latest_joint_state.position[5]
-            
-            # Base velocities
-            if len(self.latest_joint_state.velocity) >= 3:
-                obs['x.vel'] = self.latest_joint_state.velocity[0]
-                obs['y.vel'] = self.latest_joint_state.velocity[1]
-                obs['theta.vel'] = np.degrees(self.latest_joint_state.velocity[2])  # rad/s to deg/s
+        # Extract arm joint positions (pad to 6 even if arm has only 5 joints)
+        joint_positions = list(self.latest_joint_state.position) if self.latest_joint_state else []
         
-        # Add camera images (already in RGB format from callbacks)
+        # Arm has 5 joints but dataset expects 6 - pad with last joint value or 0
+        if len(joint_positions) >= 6:
+            arm_positions = joint_positions[:6]
+            gripper_pos = joint_positions[6] if len(joint_positions) > 6 else 0.0
+        elif len(joint_positions) == 5:
+            # 5-axis arm: duplicate last joint to make 6
+            arm_positions = joint_positions[:5] + [joint_positions[4]]
+            gripper_pos = 0.0
+        else:
+            # Insufficient data, pad with zeros
+            arm_positions = joint_positions + [0.0] * (6 - len(joint_positions))
+            gripper_pos = 0.0
+        
+        # Build state according to dataset feature names
+        obs['arm_joint_0'] = arm_positions[0]
+        obs['arm_joint_1'] = arm_positions[1]
+        obs['arm_joint_2'] = arm_positions[2]
+        obs['arm_joint_3'] = arm_positions[3]
+        obs['arm_joint_4'] = arm_positions[4]
+        obs['arm_joint_5'] = arm_positions[5]
+        obs['gripper_position'] = gripper_pos
+        
+        # Base velocities - set to zero for observation (not using cmd_vel for observation)
+        # The dataset was recorded with base velocities from cmd_vel, but during inference
+        # we don't have actual base velocity sensors, so we use zero
+        obs['base_linear_x'] = 0.0
+        obs['base_linear_y'] = 0.0
+        obs['base_linear_z'] = 0.0
+        obs['base_angular_x'] = 0.0
+        obs['base_angular_y'] = 0.0
+        obs['base_angular_z'] = 0.0
+        
+        # Add camera images - use simple keys without 'observation.images.' prefix
+        # build_dataset_frame() will add the prefix automatically
         if self.latest_front_image is not None:
-            obs['observation.image.front'] = self.latest_front_image
+            obs['front'] = self.latest_front_image
         
         if self.latest_wrist_image is not None:
-            obs['observation.image.wrist'] = self.latest_wrist_image
+            obs['wrist'] = self.latest_wrist_image
         
         return obs
     
@@ -437,35 +483,48 @@ class LeKiwiPolicyNode(Node):
         """Publish action commands to ROS topics."""
         timestamp = self.get_clock().now().to_msg()
         
-        # Publish arm commands
-        arm_target_pos = action.get('arm_target_position')
-        if arm_target_pos is not None:
+        self.get_logger().debug(f'Publishing commands - action keys: {action.keys()}', throttle_duration_sec=1.0)
+        
+        # Extract arm joint commands from action dict
+        # Action dict has keys like 'arm_joint_0_cmd', 'arm_joint_1_cmd', etc.
+        arm_joint_keys = ['arm_joint_0_cmd', 'arm_joint_1_cmd', 'arm_joint_2_cmd', 
+                          'arm_joint_3_cmd', 'arm_joint_4_cmd', 'arm_joint_5_cmd', 'gripper_cmd']
+        
+        if all(key in action for key in arm_joint_keys):
             arm_cmd = JointState()
             arm_cmd.header.stamp = timestamp
             arm_cmd.header.frame_id = 'base_link'
             arm_cmd.name = ['joint_1', 'joint_2', 'joint_3', 'joint_4', 'joint_5', 'gripper']
-            arm_cmd.position = arm_target_pos.tolist() if hasattr(arm_target_pos, 'tolist') else list(arm_target_pos)
             
+            # Extract arm positions from action dict
+            arm_cmd.position = [
+                float(action['arm_joint_0_cmd']),
+                float(action['arm_joint_1_cmd']),
+                float(action['arm_joint_2_cmd']),
+                float(action['arm_joint_3_cmd']),
+                float(action['arm_joint_4_cmd']),
+                float(action['arm_joint_5_cmd']),
+                # float(action['gripper_cmd'])  # Skip gripper for 5-axis arm
+            ]
+            
+            self.get_logger().info(f'Publishing arm command: {arm_cmd.position}', throttle_duration_sec=1.0)
             self.arm_joint_cmd_pub.publish(arm_cmd)
+        else:
+            self.get_logger().warn(f'Missing arm joint commands in action. Available keys: {list(action.keys())}')
         
-        # Publish base commands
-        base_linear_vel = action.get('base_linear_velocity')
-        base_angular_vel = action.get('base_angular_velocity')
+        # Extract base velocity commands
+        base_keys = ['base_linear_x_cmd', 'base_linear_y_cmd', 'base_angular_z_cmd']
         
-        if base_linear_vel is not None and base_angular_vel is not None:
+        if all(key in action for key in base_keys):
             cmd_vel = Twist()
+            cmd_vel.linear.x = float(action['base_linear_x_cmd'])
+            cmd_vel.linear.y = float(action['base_linear_y_cmd'])
+            cmd_vel.angular.z = float(action['base_angular_z_cmd'])
             
-            if isinstance(base_linear_vel, (list, tuple, np.ndarray)):
-                cmd_vel.linear.x = float(base_linear_vel[0])
-            else:
-                cmd_vel.linear.x = float(base_linear_vel)
-            
-            if isinstance(base_angular_vel, (list, tuple, np.ndarray)):
-                cmd_vel.angular.z = float(base_angular_vel[0])
-            else:
-                cmd_vel.angular.z = float(base_angular_vel)
-            
+            self.get_logger().debug(f'Publishing base command: linear=({cmd_vel.linear.x}, {cmd_vel.linear.y}), angular.z={cmd_vel.angular.z}', throttle_duration_sec=1.0)
             self.cmd_vel_pub.publish(cmd_vel)
+        else:
+            self.get_logger().debug(f'Missing base commands in action (this is normal). Available keys: {list(action.keys())}', throttle_duration_sec=5.0)
     
     def destroy_node(self):
         """Clean up resources."""
