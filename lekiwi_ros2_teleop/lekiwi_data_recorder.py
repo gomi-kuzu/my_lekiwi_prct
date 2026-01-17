@@ -263,21 +263,17 @@ class LeKiwiDataRecorder(Node):
         features = {
             "observation.state": {
                 "dtype": "float32",
-                "shape": (13,),  # 6 arm joints + 1 gripper + 3 base linear + 3 base angular
+                "shape": (9,),  # 5 arm joints + 1 gripper + 2 base linear + 1 base angular
                 "names": [
-                    "arm_joint_0",
-                    "arm_joint_1",
-                    "arm_joint_2",
-                    "arm_joint_3",
-                    "arm_joint_4",
-                    "arm_joint_5",
-                    "gripper_position",
-                    "base_linear_x",
-                    "base_linear_y",
-                    "base_linear_z",
-                    "base_angular_x",
-                    "base_angular_y",
-                    "base_angular_z",
+                    "arm_shoulder_pan.pos",
+                    "arm_shoulder_lift.pos",
+                    "arm_elbow_flex.pos",
+                    "arm_wrist_flex.pos",
+                    "arm_wrist_roll.pos",
+                    "arm_gripper.pos",
+                    "x.vel",
+                    "y.vel",
+                    "theta.vel",
                 ],
             },
             "observation.images.front": {
@@ -287,26 +283,22 @@ class LeKiwiDataRecorder(Node):
             },
             "observation.images.wrist": {
                 "dtype": "video" if self.use_videos else "image",
-                "shape": (640, 480, 3),  # height, width, channels (RGB) - different resolution
+                "shape": (640, 480, 3),  # height, width, channels (RGB) 
                 "names": ["height", "width", "channels"],
             },
             "action": {
                 "dtype": "float32",
-                "shape": (13,),  # Same as state
+                "shape": (9,),  # Same as state
                 "names": [
-                    "arm_joint_0_cmd",
-                    "arm_joint_1_cmd",
-                    "arm_joint_2_cmd",
-                    "arm_joint_3_cmd",
-                    "arm_joint_4_cmd",
-                    "arm_joint_5_cmd",
-                    "gripper_cmd",
-                    "base_linear_x_cmd",
-                    "base_linear_y_cmd",
-                    "base_linear_z_cmd",
-                    "base_angular_x_cmd",
-                    "base_angular_y_cmd",
-                    "base_angular_z_cmd",
+                    "arm_shoulder_pan.pos",
+                    "arm_shoulder_lift.pos",
+                    "arm_elbow_flex.pos",
+                    "arm_wrist_flex.pos",
+                    "arm_wrist_roll.pos",
+                    "arm_gripper.pos",
+                    "x.vel",
+                    "y.vel",
+                    "theta.vel",
                 ],
             },
         }
@@ -555,35 +547,30 @@ class LeKiwiDataRecorder(Node):
     
     def _build_observation(self) -> Dict[str, Any]:
         """Build observation dict from latest sensor data."""
-        # Extract arm joint positions (6 joints + 1 gripper)
+        # Extract arm joint positions (5 joints + 1 gripper)
         # If gripper data is not available, pad with 0
         joint_positions = list(self.latest_joint_state.position)
-        if len(joint_positions) >= 7:
-            arm_positions = joint_positions[:7]
-        elif len(joint_positions) == 6:
-            arm_positions = joint_positions[:6] + [0.0]  # Add gripper position as 0
+        if len(joint_positions) >= 6:
+            arm_positions = joint_positions[:6]
+        elif len(joint_positions) == 5:
+            arm_positions = joint_positions[:5] + [0.0]  # Add gripper position as 0
         else:
-            # Pad to 7 elements if less than 6
-            arm_positions = joint_positions + [0.0] * (7 - len(joint_positions))
+            # Pad to 6 elements if less than 5
+            arm_positions = joint_positions + [0.0] * (6 - len(joint_positions))
         
-        # Extract base velocities (default to zeros if cmd_vel not available)
-        if self.latest_cmd_vel is not None:
-            base_linear = [
-                self.latest_cmd_vel.linear.x,
-                self.latest_cmd_vel.linear.y,
-                self.latest_cmd_vel.linear.z
-            ]
-            base_angular = [
-                self.latest_cmd_vel.angular.x,
-                self.latest_cmd_vel.angular.y,
-                self.latest_cmd_vel.angular.z
+        # Extract base velocities (x, y, theta)
+        # Use joint_state.velocity which contains [x.vel, y.vel, theta.vel] from teleop node
+        if self.latest_joint_state is not None and len(self.latest_joint_state.velocity) >= 3:
+            base_velocities = [
+                self.latest_joint_state.velocity[0],  # x.vel
+                self.latest_joint_state.velocity[1],  # y.vel
+                self.latest_joint_state.velocity[2],  # theta.vel
             ]
         else:
-            base_linear = [0.0, 0.0, 0.0]
-            base_angular = [0.0, 0.0, 0.0]
+            base_velocities = [0.0, 0.0, 0.0]
         
         # Combine into state vector
-        state = np.array(arm_positions + base_linear + base_angular, dtype=np.float32)
+        state = np.array(arm_positions + base_velocities, dtype=np.float32)
         
         observation = {
             "state": state,
@@ -597,35 +584,29 @@ class LeKiwiDataRecorder(Node):
     
     def _build_action(self) -> Dict[str, Any]:
         """Build action dict from latest command data."""
-        # Extract arm joint commands (6 joints + 1 gripper)
+        # Extract arm joint commands (5 joints + 1 gripper)
         # If gripper data is not available, pad with 0
         joint_commands = list(self.latest_arm_cmd.position)
-        if len(joint_commands) >= 7:
-            arm_commands = joint_commands[:7]
-        elif len(joint_commands) == 6:
-            arm_commands = joint_commands[:6] + [0.0]  # Add gripper command as 0
+        if len(joint_commands) >= 6:
+            arm_commands = joint_commands[:6]
+        elif len(joint_commands) == 5:
+            arm_commands = joint_commands[:5] + [0.0]  # Add gripper command as 0
         else:
-            # Pad to 7 elements if less than 6
-            arm_commands = joint_commands + [0.0] * (7 - len(joint_commands))
+            # Pad to 6 elements if less than 5
+            arm_commands = joint_commands + [0.0] * (6 - len(joint_commands))
         
-        # Extract base velocity commands (default to zeros if not available)
+        # Extract base velocity commands (x, y, theta)
         if self.latest_cmd_vel is not None:
-            base_linear = [
-                self.latest_cmd_vel.linear.x,
-                self.latest_cmd_vel.linear.y,
-                self.latest_cmd_vel.linear.z
-            ]
-            base_angular = [
-                self.latest_cmd_vel.angular.x,
-                self.latest_cmd_vel.angular.y,
-                self.latest_cmd_vel.angular.z
+            base_vel_commands = [
+                self.latest_cmd_vel.linear.x,   # x.vel_cmd
+                self.latest_cmd_vel.linear.y,   # y.vel_cmd
+                self.latest_cmd_vel.angular.z,  # theta.vel_cmd
             ]
         else:
-            base_linear = [0.0, 0.0, 0.0]
-            base_angular = [0.0, 0.0, 0.0]
+            base_vel_commands = [0.0, 0.0, 0.0]
         
         # Combine into action vector
-        action_array = np.array(arm_commands + base_linear + base_angular, dtype=np.float32)
+        action_array = np.array(arm_commands + base_vel_commands, dtype=np.float32)
         
         action = action_array
         
