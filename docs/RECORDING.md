@@ -309,63 +309,10 @@ lerobot-dataset-viz \
     --root ~/lerobot_datasets
 ```
 
-3. **Pythonで直接データを確認**:
-```python
-from pathlib import Path
-from lerobot.datasets.lerobot_dataset import LeRobotDataset
-import matplotlib.pyplot as plt
-
-# データセットをロード
-dataset = LeRobotDataset(
-    repo_id="username/my_dataset",
-    root=str(Path.home() / "lerobot_datasets")
-)
-
-# 特定のエピソードを選択
-episode_index = 2
-episode_data = dataset.select_episodes([episode_index])
-
-print(f"Episode {episode_index}:")
-print(f"  Frames: {len(episode_data)}")
-print(f"  First frame keys: {episode_data[0].keys()}")
-
-# フレームを表示
-frame = episode_data[0]
-if "observation.images.front" in frame:
-    import numpy as np
-    img = np.array(frame["observation.images.front"])
-    plt.imshow(img)
-    plt.title(f"Episode {episode_index} - Frame 0 - Front Camera")
-    plt.show()
+3. バグフィックス版（一時しのぎ）:
 ```
-
-4. **データセットの全体を確認**:
-```python
-from pathlib import Path
-from lerobot.datasets.lerobot_dataset import LeRobotDataset
-
-dataset = LeRobotDataset(
-    repo_id="username/my_dataset",
-    root=str(Path.home() / "lerobot_datasets")
-)
-
-print(f"Dataset: {dataset.repo_id}")
-print(f"Total episodes: {dataset.num_episodes}")
-print(f"Total frames: {dataset.num_frames}")
-print(f"FPS: {dataset.fps}")
-
-# 各エピソードの情報を表示
-import pandas as pd
-episodes_df = pd.DataFrame(dataset.meta.episodes)
-print("\nEpisode information:")
-print(episodes_df[['episode_index', 'length', 'dataset_from_index', 'dataset_to_index']])
+python src/lekiwi_ros2_teleop/lekiwi_ros2_teleop/lekiwi_dataset_viz.py   --repo-id  [dataset path]  --episode-index 1
 ```
-
-**注意**: 
-- この問題はデータセット自体の問題ではなく、可視化ツール側のバグです
-- データは正しく保存されており、トレーニングには問題なく使用できます
-- LeRobotの将来のバージョンで修正される可能性があります
-
 ### データセットのトレーニングでの使用
 
 データセットは正しく保存されているため、トレーニングには問題なく使用できます：
@@ -378,21 +325,6 @@ lerobot-train \
     dataset.repo_id=username/my_dataset \
     dataset.root=~/lerobot_datasets
 ```
-
-### resumeモードでのエラー
-
-**症状**: `resume:=true`でデータレコーダーを起動すると「Repository Not Found」エラーが発生する
-
-**原因**: 
-Hugging Face Hubへのアクセスを試みているが、ローカルデータセットのみを使用する設定になっていない
-
-**解決方法**:
-最新バージョンのコードを使用していることを確認してください。現在のバージョンでは、resumeモードで自動的にローカルファイルのみを使用します。
-
-### データが記録されない
-- すべての必要なトピックがパブリッシュされているか確認: `ros2 topic list`
-- データレコーダーが警告を出していないか確認
-- カメラトピックの確認: `ros2 topic echo /lekiwi/camera/front/image_raw/compressed --no-arr`
 
 ## 参考リンク
 
