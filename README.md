@@ -271,7 +271,8 @@ source ~/.zshrc   # zshの場合
 
 ```bash
 cd ~/ros2_ws
-micromamba run -n leros colcon build --packages-select lekiwi_ros2_teleop
+micromamba activate leros
+colcon build --packages-select lekiwi_ros2_teleop
 source install/setup.bash
 ```
 
@@ -283,7 +284,7 @@ source install/setup.bash
 
 ```bash
 # LeKiwiロボット上で実行
-micromamba run -n leros ros2 run lekiwi_ros2_teleop lekiwi_teleop_node \
+ros2 run lekiwi_ros2_teleop lekiwi_teleop_node \
   --ros-args -p robot_port:=/dev/ttyACM0
 ```
 
