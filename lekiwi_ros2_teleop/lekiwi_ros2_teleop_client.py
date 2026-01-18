@@ -309,6 +309,20 @@ class LeKiwiROS2TeleopClient(Node):
             arm_action.get('gripper.pos', 0.0),
         ]
         
+        # Debug: Log gripper position periodically
+        # current_time = self.get_clock().now()
+        # if not hasattr(self, '_last_gripper_log_time'):
+        #     self._last_gripper_log_time = current_time
+        #     self._frame_count = 0
+        # 
+        # self._frame_count += 1
+        # if self._frame_count % 30 == 0:  # Log every second at 30Hz
+        #     self.get_logger().info(
+        #         f'[ARM_CMD] Gripper pos from leader_arm: {arm_action.get("gripper.pos", "NOT_FOUND")} | '
+        #         f'All positions: {msg.position}',
+        #         throttle_duration_sec=1.0
+        #     )
+        
         self.arm_cmd_pub.publish(msg)
     
     def _publish_base_commands(self, base_action: dict):

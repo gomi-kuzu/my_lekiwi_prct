@@ -550,13 +550,29 @@ class LeKiwiDataRecorder(Node):
         # Extract arm joint positions (5 joints + 1 gripper)
         # If gripper data is not available, pad with 0
         joint_positions = list(self.latest_joint_state.position)
+        
+        # Debug: log the number of joint positions received
+        # if self.frame_count % 30 == 0:  # Log every second
+        #     self.get_logger().info(
+        #         f'Received {len(joint_positions)} joint positions: {joint_positions}',
+        #         throttle_duration_sec=1.0
+        #     )
+        
         if len(joint_positions) >= 6:
             arm_positions = joint_positions[:6]
         elif len(joint_positions) == 5:
             arm_positions = joint_positions[:5] + [0.0]  # Add gripper position as 0
+            self.get_logger().warn(
+                f'Only 5 joint positions received, padding gripper with 0.0',
+                throttle_duration_sec=5.0
+            )
         else:
             # Pad to 6 elements if less than 5
             arm_positions = joint_positions + [0.0] * (6 - len(joint_positions))
+            self.get_logger().warn(
+                f'Only {len(joint_positions)} joint positions received, padding to 6',
+                throttle_duration_sec=5.0
+            )
         
         # Extract base velocities (x, y, theta)
         # Use joint_state.velocity which contains [x.vel, y.vel, theta.vel] from teleop node
@@ -587,13 +603,29 @@ class LeKiwiDataRecorder(Node):
         # Extract arm joint commands (5 joints + 1 gripper)
         # If gripper data is not available, pad with 0
         joint_commands = list(self.latest_arm_cmd.position)
+        
+        # Debug: log the number of joint commands received
+        # if self.frame_count % 30 == 0:  # Log every second
+        #     self.get_logger().info(
+        #         f'Received {len(joint_commands)} joint commands: {joint_commands}',
+        #         throttle_duration_sec=1.0
+        #     )
+        
         if len(joint_commands) >= 6:
             arm_commands = joint_commands[:6]
         elif len(joint_commands) == 5:
             arm_commands = joint_commands[:5] + [0.0]  # Add gripper command as 0
+            self.get_logger().warn(
+                f'Only 5 joint commands received, padding gripper with 0.0',
+                throttle_duration_sec=5.0
+            )
         else:
             # Pad to 6 elements if less than 5
             arm_commands = joint_commands + [0.0] * (6 - len(joint_commands))
+            self.get_logger().warn(
+                f'Only {len(joint_commands)} joint commands received, padding to 6',
+                throttle_duration_sec=5.0
+            )
         
         # Extract base velocity commands (x, y, theta)
         if self.latest_cmd_vel is not None:

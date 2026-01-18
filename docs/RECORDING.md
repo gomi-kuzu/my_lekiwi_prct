@@ -57,8 +57,8 @@ source install/setup.bash
 ros2 launch lekiwi_ros2_teleop lekiwi_record.launch.py \
     launch_teleop:=false \
     dataset_repo_id:=john/lekiwi_pick_place \
-    single_task:="Pick and place the bottle cap" \
-    fps:=30
+    fps:=30 \
+    single_task:="Pick and place the bottle cap"
 ```
 
 **既存のデータセットにエピソードを追加する場合:**
@@ -67,9 +67,9 @@ source install/setup.bash
 ros2 launch lekiwi_ros2_teleop lekiwi_record.launch.py \
     launch_teleop:=false \
     dataset_repo_id:=john/lekiwi_pick_place \
-    single_task:="Pick and place the bottle cap" \
     fps:=30 \
-    resume:=true
+    resume:=true \
+    single_task:="Pick and place the bottle cap"
 ```
 
 **重要な注意事項**: 
