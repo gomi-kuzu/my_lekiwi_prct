@@ -93,7 +93,7 @@ ros2 service call /lekiwi/policy/start std_srvs/srv/Trigger
 
 #### オプションパラメータ
 
-- `control_frequency`: 制御ループの周波数（デフォルト: `50.0` Hz）
+- `control_frequency`: 制御ループの周波数（デフォルト: `30.0` Hz)
 - `device`: 推論デバイス（デフォルト: `cuda`、他に `cpu`, `mps`）
 - `use_amp`: 自動混合精度を使用（デフォルト: `false`）
 - `use_degrees`: 角度を度数法で扱う（デフォルト: `false`）
