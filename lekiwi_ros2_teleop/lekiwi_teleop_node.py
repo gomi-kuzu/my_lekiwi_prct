@@ -74,6 +74,21 @@ class LeKiwiTeleopNode(Node):
         self.declare_parameter('watchdog_timeout_ms', 500)
         self.declare_parameter('use_degrees', False)
         self.declare_parameter('rotate_front_camera', True)  # Front camera mounted upside down
+        # Use by-path for stable identification (based on USB port location)
+        # This is better for identical camera models with same serial numbers
+        # Note: Connect cameras to different USB ports to get different paths
+        self.declare_parameter('front_camera_device', 
+            '/dev/v4l/by-path/platform-xhci-hcd.1-usb-0:2:1.0-video-index0,/dev/video0,/dev/video2')  
+        self.declare_parameter('wrist_camera_device', 
+            '/dev/v4l/by-path/platform-xhci-hcd.0-usb-0:2:1.0-video-index0,/dev/video0,/dev/video2,/dev/video3')  
+        # Camera settings
+        self.declare_parameter('camera_fps', 30)  # Camera FPS (must match hardware capability)
+        self.declare_parameter('front_camera_width', 640)  # Front camera width
+        self.declare_parameter('front_camera_height', 480)  # Front camera height
+        self.declare_parameter('wrist_camera_width', 480)  # Wrist camera width 
+        self.declare_parameter('wrist_camera_height', 640)  # Wrist camera height
+        self.declare_parameter('enable_cameras', True)  # Allow disabling cameras for debugging
+        self.declare_parameter('allow_camera_failure', True)  # Continue robot operation even if cameras fail
         
         # Get parameters
         robot_port = self.get_parameter('robot_port').value
@@ -81,6 +96,15 @@ class LeKiwiTeleopNode(Node):
         self.watchdog_timeout_ms = self.get_parameter('watchdog_timeout_ms').value
         use_degrees = self.get_parameter('use_degrees').value
         self.rotate_front_camera = self.get_parameter('rotate_front_camera').value
+        front_camera_device_list = self.get_parameter('front_camera_device').value.split(',')
+        wrist_camera_device_list = self.get_parameter('wrist_camera_device').value.split(',')
+        camera_fps = self.get_parameter('camera_fps').value
+        front_camera_width = self.get_parameter('front_camera_width').value
+        front_camera_height = self.get_parameter('front_camera_height').value
+        wrist_camera_width = self.get_parameter('wrist_camera_width').value
+        wrist_camera_height = self.get_parameter('wrist_camera_height').value
+        self.enable_cameras = self.get_parameter('enable_cameras').value
+        allow_camera_failure = self.get_parameter('allow_camera_failure').value
         
         # Configure robot
         self.get_logger().info('Configuring LeKiwi robot...')
@@ -89,16 +113,105 @@ class LeKiwiTeleopNode(Node):
             use_degrees=use_degrees,
             disable_torque_on_disconnect=True,
         )
+        
+        # Override camera settings
+        if self.enable_cameras:
+            # Use first device in the list as primary
+            front_camera_device = front_camera_device_list[0].strip()
+            wrist_camera_device = wrist_camera_device_list[0].strip()
+            
+            robot_config.cameras['front'].index_or_path = front_camera_device
+            robot_config.cameras['front'].fps = camera_fps
+            robot_config.cameras['front'].width = front_camera_width
+            robot_config.cameras['front'].height = front_camera_height
+            
+            robot_config.cameras['wrist'].index_or_path = wrist_camera_device
+            robot_config.cameras['wrist'].fps = camera_fps
+            robot_config.cameras['wrist'].width = wrist_camera_width
+            robot_config.cameras['wrist'].height = wrist_camera_height
+            
+            self.get_logger().info(f'Front camera: {front_camera_device} (fallback: {front_camera_device_list[1:]})')
+            self.get_logger().info(f'  Resolution: {front_camera_width}x{front_camera_height}@{camera_fps}fps')
+            self.get_logger().info(f'Wrist camera: {wrist_camera_device} (fallback: {wrist_camera_device_list[1:]})')
+            self.get_logger().info(f'  Resolution: {wrist_camera_width}x{wrist_camera_height}@{camera_fps}fps, rotated 90°')
+        else:
+            # Disable cameras by removing them from config
+            robot_config.cameras = {}
+            self.get_logger().info('Cameras disabled')
+        
         self.robot = LeKiwi(robot_config)
         
-        # Connect to robot
+        # Connect to robot with camera fallback handling
         self.get_logger().info('Connecting to LeKiwi robot...')
+        connected = False
+        last_error = None
+        
+        # Try initial connection
         try:
             self.robot.connect()
             self.get_logger().info('LeKiwi robot connected successfully!')
+            connected = True
         except Exception as e:
-            self.get_logger().error(f'Failed to connect to robot: {e}')
-            raise
+            last_error = str(e)
+            # If camera failure and allow_camera_failure is True, try fallback devices
+            if allow_camera_failure and self.enable_cameras and 'OpenCVCamera' in str(e):
+                self.get_logger().warn(f'Camera initialization failed: {e}')
+                
+                # Determine which camera failed and try fallbacks
+                failed_camera = None
+                if 'front' in str(e).lower() or front_camera_device in str(e):
+                    failed_camera = 'front'
+                    fallback_list = front_camera_device_list
+                elif 'wrist' in str(e).lower() or wrist_camera_device in str(e):
+                    failed_camera = 'wrist'
+                    fallback_list = wrist_camera_device_list
+                else:
+                    # Try wrist fallbacks first, then front
+                    failed_camera = 'wrist'
+                    fallback_list = wrist_camera_device_list
+                
+                # Try fallback devices
+                for fallback_device in fallback_list[1:]:
+                    fallback_device = fallback_device.strip()
+                    self.get_logger().info(f'Trying fallback {failed_camera} camera: {fallback_device}')
+                    try:
+                        # Recreate robot config with new device
+                        if failed_camera == 'front':
+                            robot_config.cameras['front'].index_or_path = fallback_device
+                        else:
+                            robot_config.cameras['wrist'].index_or_path = fallback_device
+                        self.robot = LeKiwi(robot_config)
+                        self.robot.connect()
+                        self.get_logger().info(f'Connected with {failed_camera} camera: {fallback_device}')
+                        connected = True
+                        break
+                    except Exception as fallback_error:
+                        self.get_logger().warn(f'Fallback {fallback_device} failed: {fallback_error}')
+                        last_error = str(fallback_error)
+                
+                # If all camera devices failed, try without cameras
+                if not connected:
+                    self.get_logger().warn('All camera devices failed. Trying without cameras...')
+                    try:
+                        robot_config.cameras = {}
+                        self.robot = LeKiwi(robot_config)
+                        self.robot.connect()
+                        self.get_logger().warn('=' * 60)
+                        self.get_logger().warn('WARNING: LeKiwi robot connected WITHOUT CAMERAS!')
+                        self.get_logger().warn('Camera images will not be published.')
+                        self.get_logger().warn('=' * 60)
+                        self.enable_cameras = False  # Disable camera publishing
+                        connected = True
+                    except Exception as no_cam_error:
+                        last_error = str(no_cam_error)
+        
+        if not connected:
+            self.get_logger().error(f'Failed to connect to robot: {last_error}')
+            raise RuntimeError(last_error)
+        
+        # Print camera status warning if cameras are disabled
+        if not self.enable_cameras:
+            self.get_logger().warn('Camera publishing is DISABLED - no camera topics will be published')
         
         # Initialize command tracking
         self.last_cmd_time = self.get_clock().now()
@@ -118,6 +231,17 @@ class LeKiwiTeleopNode(Node):
             "y.vel": 0.0,
             "theta.vel": 0.0,
         }
+        
+        # Camera error tracking for logging throttle
+        self.camera_error_counts = {
+            'front': 0,
+            'wrist': 0,
+        }
+        self.camera_last_error_time = {
+            'front': None,
+            'wrist': None,
+        }
+        self.camera_error_log_interval = 5.0  # Log camera errors at most once per 5 seconds
         
         # QoS profile for real-time control
         qos_profile = QoSProfile(
@@ -272,11 +396,53 @@ class LeKiwiTeleopNode(Node):
         
         self.joint_state_pub.publish(msg)
     
+    def _log_camera_error(self, camera_name: str, error_msg: str, log_level: str = 'warn'):
+        """Log camera errors with throttling to avoid spamming logs."""
+        now = self.get_clock().now()
+        
+        # Increment error count
+        self.camera_error_counts[camera_name] += 1
+        
+        # Check if we should log (first error or after interval)
+        should_log = False
+        if self.camera_last_error_time[camera_name] is None:
+            should_log = True
+        else:
+            time_since_last_log = (now - self.camera_last_error_time[camera_name]).nanoseconds / 1e9
+            if time_since_last_log >= self.camera_error_log_interval:
+                should_log = True
+        
+        if should_log:
+            error_count = self.camera_error_counts[camera_name]
+            msg = f'{camera_name.capitalize()} camera error: {error_msg}'
+            if error_count > 1:
+                msg += f' (occurred {error_count} times)'
+            
+            if log_level == 'warn':
+                self.get_logger().warn(msg)
+            elif log_level == 'debug':
+                self.get_logger().debug(msg)
+            elif log_level == 'error':
+                self.get_logger().error(msg)
+            
+            self.camera_last_error_time[camera_name] = now
+            self.camera_error_counts[camera_name] = 0  # Reset count after logging
+    
     def publish_camera_images(self, observation: dict):
         """Publish camera images as compressed images."""
+        if not self.enable_cameras:
+            return
+        
         # Front camera
         if 'front' in observation and isinstance(observation['front'], np.ndarray):
             try:
+                front_image = observation['front']
+                
+                # Validate image before processing
+                if front_image.size == 0 or front_image.shape[0] == 0 or front_image.shape[1] == 0:
+                    self._log_camera_error('front', 'Invalid image dimensions')
+                    return
+                
                 front_msg = CompressedImage()
                 front_msg.header = Header()
                 front_msg.header.stamp = self.get_clock().now().to_msg()
@@ -284,7 +450,6 @@ class LeKiwiTeleopNode(Node):
                 front_msg.format = 'jpeg'
                 
                 # Apply rotation if camera is mounted upside down
-                front_image = observation['front']
                 if self.rotate_front_camera:
                     front_image = cv2.rotate(front_image, cv2.ROTATE_180)
                 
@@ -298,12 +463,26 @@ class LeKiwiTeleopNode(Node):
                 if ret:
                     front_msg.data = buffer.tobytes()
                     self.front_camera_pub.publish(front_msg)
+                    # Reset error count on successful publish
+                    self.camera_error_counts['front'] = 0
+                else:
+                    self._log_camera_error('front', 'JPEG encoding failed')
             except Exception as e:
-                self.get_logger().warn(f'Failed to publish front camera image: {e}')
+                self._log_camera_error('front', str(e))
+        else:
+            # Camera data not available in observation
+            self._log_camera_error('front', 'Camera data not available in observation', log_level='debug')
         
         # Wrist camera
         if 'wrist' in observation and isinstance(observation['wrist'], np.ndarray):
             try:
+                wrist_image = observation['wrist']
+                
+                # Validate image before processing
+                if wrist_image.size == 0 or wrist_image.shape[0] == 0 or wrist_image.shape[1] == 0:
+                    self._log_camera_error('wrist', 'Invalid image dimensions')
+                    return
+                
                 wrist_msg = CompressedImage()
                 wrist_msg.header = Header()
                 wrist_msg.header.stamp = self.get_clock().now().to_msg()
@@ -312,7 +491,7 @@ class LeKiwiTeleopNode(Node):
                 
                 # Convert RGB to BGR for OpenCV encoding
                 # LeRobot returns images in RGB format, but cv2.imencode expects BGR
-                wrist_bgr = cv2.cvtColor(observation['wrist'], cv2.COLOR_RGB2BGR)
+                wrist_bgr = cv2.cvtColor(wrist_image, cv2.COLOR_RGB2BGR)
                 
                 # Encode image as JPEG
                 ret, buffer = cv2.imencode('.jpg', wrist_bgr,
@@ -320,8 +499,15 @@ class LeKiwiTeleopNode(Node):
                 if ret:
                     wrist_msg.data = buffer.tobytes()
                     self.wrist_camera_pub.publish(wrist_msg)
+                    # Reset error count on successful publish
+                    self.camera_error_counts['wrist'] = 0
+                else:
+                    self._log_camera_error('wrist', 'JPEG encoding failed')
             except Exception as e:
-                self.get_logger().warn(f'Failed to publish wrist camera image: {e}')
+                self._log_camera_error('wrist', str(e))
+        else:
+            # Camera data not available in observation
+            self._log_camera_error('wrist', 'Camera data not available in observation', log_level='debug')
     
     def shutdown(self):
         """Cleanup on shutdown."""
