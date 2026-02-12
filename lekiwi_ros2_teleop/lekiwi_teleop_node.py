@@ -243,6 +243,20 @@ class LeKiwiTeleopNode(Node):
         }
         self.camera_error_log_interval = 5.0  # Log camera errors at most once per 5 seconds
         
+        # Reconnection tracking
+        self.reconnection_attempt_count = 0
+        self.max_reconnection_attempts = 3
+        self.reconnection_cooldown = 5.0  # Wait 5 seconds between reconnection attempts
+        self.last_reconnection_time = None
+        self.consecutive_errors = 0
+        self.error_threshold = 10  # Trigger reconnection after 10 consecutive errors
+        
+        # Store camera config for reconnection
+        self.robot_config = robot_config
+        self.front_camera_device_list = front_camera_device_list
+        self.wrist_camera_device_list = wrist_camera_device_list
+        self.allow_camera_failure = allow_camera_failure
+        
         # QoS profile for real-time control
         qos_profile = QoSProfile(
             reliability=ReliabilityPolicy.RELIABLE,
@@ -352,6 +366,9 @@ class LeKiwiTeleopNode(Node):
             # Get observations
             observation = self.robot.get_observation()
             
+            # Reset consecutive errors on successful observation
+            self.consecutive_errors = 0
+            
             # Publish joint states
             self.publish_joint_states(observation)
             
@@ -359,7 +376,17 @@ class LeKiwiTeleopNode(Node):
             self.publish_camera_images(observation)
             
         except Exception as e:
-            self.get_logger().error(f'Error in control loop: {e}')
+            self.consecutive_errors += 1
+            self.get_logger().error(f'Error in control loop: {e} (consecutive errors: {self.consecutive_errors})')
+            
+            # Try reconnection if too many consecutive errors
+            if self.consecutive_errors >= self.error_threshold:
+                self.get_logger().warn(f'Reached error threshold ({self.error_threshold}). Attempting reconnection...')
+                if self.attempt_reconnection():
+                    self.consecutive_errors = 0
+                    self.get_logger().info('Reconnection successful!')
+                else:
+                    self.get_logger().error('Reconnection failed. Will retry later.')
     
     def publish_joint_states(self, observation: dict):
         """Publish current joint states."""
@@ -395,6 +422,89 @@ class LeKiwiTeleopNode(Node):
         ]
         
         self.joint_state_pub.publish(msg)
+    
+    def attempt_reconnection(self) -> bool:
+        """Attempt to reconnect to the robot with camera fallback."""
+        now = self.get_clock().now()
+        
+        # Check cooldown period
+        if self.last_reconnection_time is not None:
+            time_since_last = (now - self.last_reconnection_time).nanoseconds / 1e9
+            if time_since_last < self.reconnection_cooldown:
+                self.get_logger().debug(f'Reconnection cooldown: {self.reconnection_cooldown - time_since_last:.1f}s remaining')
+                return False
+        
+        # Check max attempts
+        if self.reconnection_attempt_count >= self.max_reconnection_attempts:
+            self.get_logger().warn('Max reconnection attempts reached. Resetting counter.')
+            self.reconnection_attempt_count = 0
+            return False
+        
+        self.last_reconnection_time = now
+        self.reconnection_attempt_count += 1
+        
+        self.get_logger().info(f'Reconnection attempt {self.reconnection_attempt_count}/{self.max_reconnection_attempts}')
+        
+        try:
+            # Disconnect current robot
+            self.get_logger().info('Disconnecting current robot connection...')
+            try:
+                self.robot.disconnect()
+            except Exception as e:
+                self.get_logger().warn(f'Error during disconnect: {e}')
+            
+            # Try to reconnect with fallback devices
+            connected = False
+            
+            # Try all combinations of camera devices
+            for front_idx, front_device in enumerate(self.front_camera_device_list):
+                if connected:
+                    break
+                    
+                for wrist_idx, wrist_device in enumerate(self.wrist_camera_device_list):
+                    front_device = front_device.strip()
+                    wrist_device = wrist_device.strip()
+                    
+                    self.get_logger().info(f'Trying front: {front_device}, wrist: {wrist_device}')
+                    
+                    try:
+                        # Update camera config
+                        if self.enable_cameras:
+                            self.robot_config.cameras['front'].index_or_path = front_device
+                            self.robot_config.cameras['wrist'].index_or_path = wrist_device
+                        
+                        # Create new robot instance
+                        self.robot = LeKiwi(self.robot_config)
+                        self.robot.connect()
+                        
+                        self.get_logger().info(f'Reconnected with front: {front_device}, wrist: {wrist_device}')
+                        connected = True
+                        self.reconnection_attempt_count = 0  # Reset on success
+                        break
+                        
+                    except Exception as e:
+                        self.get_logger().debug(f'Failed with front: {front_device}, wrist: {wrist_device} - {e}')
+                        continue
+            
+            # If all camera combinations failed, try without cameras
+            if not connected and self.allow_camera_failure:
+                self.get_logger().warn('All camera combinations failed. Reconnecting without cameras...')
+                try:
+                    self.robot_config.cameras = {}
+                    self.robot = LeKiwi(self.robot_config)
+                    self.robot.connect()
+                    self.enable_cameras = False
+                    self.get_logger().warn('Reconnected WITHOUT cameras')
+                    connected = True
+                    self.reconnection_attempt_count = 0
+                except Exception as e:
+                    self.get_logger().error(f'Failed to reconnect without cameras: {e}')
+            
+            return connected
+            
+        except Exception as e:
+            self.get_logger().error(f'Reconnection failed: {e}')
+            return False
     
     def _log_camera_error(self, camera_name: str, error_msg: str, log_level: str = 'warn'):
         """Log camera errors with throttling to avoid spamming logs."""
