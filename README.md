@@ -182,7 +182,70 @@ ros2 service call /lekiwi/data_recorder/save_dataset std_srvs/srv/Trigger
 
 ## セットアップ
 
-### 1. 環境変数の設定（必須）
+### 1. カメラデバイスパスの確認と設定（必須）
+
+カメラの `/dev/v4l/by-path/` パスは **USBポートの物理的な接続位置に依存します**。
+カメラを別のポートに挿し直したり、ラズパイを再起動したりするとパスが変わる場合があります。
+初回セットアップ時、および接続を変更した際は必ず以下の手順でパスを確認してください。
+
+#### ステップ1: 接続されているカメラのパスを確認
+
+```bash
+# by-pathの一覧（カメラデバイスのみ）
+ls -la /dev/v4l/by-path/ | grep video-index0
+
+# USBトポロジーの確認（バス帯域の確認に有用）
+lsusb -t
+```
+
+出力例：
+```
+lrwxrwxrwx ... platform-xhci-hcd.1-usb-0:2:1.0-video-index0 -> ../../video0
+lrwxrwxrwx ... platform-xhci-hcd.1-usb-0:1.3:1.0-video-index0 -> ../../video2
+```
+
+#### ステップ2: ノードのデフォルトパラメータを更新
+
+`lekiwi_teleop_node.py` の以下の箇所を実際のパスに書き換えてください：
+
+```python
+# src/lekiwi_ros2_teleop/lekiwi_ros2_teleop/lekiwi_teleop_node.py (80行目付近)
+self.declare_parameter('front_camera_device',
+    '/dev/v4l/by-path/<フロントカメラのby-path>,/dev/video0')
+self.declare_parameter('wrist_camera_device',
+    '/dev/v4l/by-path/<リストカメラのby-path>,/dev/video2')
+```
+
+または、ノード起動時にパラメータで指定することもできます：
+
+```bash
+ros2 run lekiwi_ros2_teleop lekiwi_teleop_node \
+  --ros-args \
+  -p robot_port:=/dev/ttyACM0 \
+  -p front_camera_device:='/dev/v4l/by-path/platform-xhci-hcd.1-usb-0:2:1.0-video-index0,/dev/video0' \
+  -p wrist_camera_device:='/dev/v4l/by-path/platform-xhci-hcd.1-usb-0:1.3:1.0-video-index0,/dev/video2'
+```
+
+> **注意**: カンマ区切りで複数のパスを指定できます。最初のパスで失敗した場合、次のパスが試されます（フォールバック）。
+
+#### USB帯域の注意事項
+
+2台のカメラを使用する場合、**両カメラを同じUSBバスに接続すると帯域不足でフレームタイムアウトが発生**する場合があります。
+
+```
+# 帯域不足の症状
+[ERROR] Timed out waiting for frame from camera OpenCVCamera(...) after 200 ms.
+```
+
+対処法：
+- 2台のカメラを**異なるUSBコントローラー**（`xhci-hcd.0` と `xhci-hcd.1`）に分けて接続する
+- またはFPSを下げる: `-p camera_fps:=15`
+
+`lsusb -t` でバス構成を確認し、カメラが異なる `Bus` に接続されていることが理想です。
+
+---
+
+### 2. 環境変数の設定（必須）
 
 #### LEROBOT_PATH（必須）
 
