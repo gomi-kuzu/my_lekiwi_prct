@@ -121,7 +121,7 @@ class LeKiwiPolicyNode(Node):
         self.declare_parameter('policy_path', '')
         self.declare_parameter('dataset_repo_id', '')
         self.declare_parameter('dataset_root', str(Path.home() / 'lerobot_datasets'))
-        self.declare_parameter('control_frequency', 50.0)
+        self.declare_parameter('control_frequency', 30.0)
         self.declare_parameter('single_task', '')
         self.declare_parameter('device', 'cuda')
         self.declare_parameter('use_amp', False)
