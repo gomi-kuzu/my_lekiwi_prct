@@ -78,9 +78,17 @@ class LeKiwiTeleopNode(Node):
         # This is better for identical camera models with same serial numbers
         # Note: Connect cameras to different USB ports to get different paths
         self.declare_parameter('front_camera_device', 
-            '/dev/v4l/by-path/platform-xhci-hcd.1-usb-0:2:1.0-video-index0,/dev/video0,/dev/video2')  
+            '/dev/v4l/by-path/platform-xhci-hcd.1-usb-0:2:1.0-video-index0,/dev/video0')  
         self.declare_parameter('wrist_camera_device', 
-            '/dev/v4l/by-path/platform-xhci-hcd.0-usb-0:2:1.0-video-index0,/dev/video0,/dev/video2,/dev/video3')  
+            '/dev/v4l/by-path/platform-xhci-hcd.1-usb-0:1.3:1.0-video-index0,/dev/video2')
+        
+        ##### not use usb-hub #########
+        # self.declare_parameter('front_camera_device', 
+        #     '/dev/v4l/by-path/platform-xhci-hcd.1-usb-0:2:1.0-video-index0,/dev/video0,/dev/video2')  
+        # self.declare_parameter('wrist_camera_device', 
+        #     '/dev/v4l/by-path/platform-xhci-hcd.0-usb-0:2:1.0-video-index0,/dev/video0,/dev/video2,/dev/video3')  
+        ##---------------------------##
+
         # Camera settings
         self.declare_parameter('camera_fps', 30)  # Camera FPS (must match hardware capability)
         self.declare_parameter('front_camera_width', 640)  # Front camera width
