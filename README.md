@@ -73,8 +73,8 @@ ros2 service call /lekiwi_data_recorder/save_dataset std_srvs/srv/Trigger
 
 ```
 ┌────────────────────┐
-│ SO100 Leader Arm   │
-│ Keyboard           │
+│ SO101 Leader Arm   │
+│ JoyController      │
 └─────────┬──────────┘
           │ input
           ↓
