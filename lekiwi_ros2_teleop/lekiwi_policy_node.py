@@ -125,6 +125,7 @@ class LeKiwiPolicyNode(Node):
         self.declare_parameter('single_task', '')
         self.declare_parameter('device', 'cuda')
         self.declare_parameter('use_amp', False)
+        self.declare_parameter('rename_map', '')
         
         # Get parameters
         policy_path_raw = self.get_parameter('policy_path').value
@@ -135,6 +136,14 @@ class LeKiwiPolicyNode(Node):
         self.single_task = self.get_parameter('single_task').value
         device = self.get_parameter('device').value
         use_amp = self.get_parameter('use_amp').value
+        
+        # Parse rename_map (JSON string -> dict)
+        rename_map_str = self.get_parameter('rename_map').value
+        if rename_map_str:
+            self.rename_map = json.loads(rename_map_str)
+            self.get_logger().info(f'Using rename_map: {self.rename_map}')
+        else:
+            self.rename_map = None
         
         # Validate parameters
         if not self.policy_path:
@@ -274,7 +283,8 @@ class LeKiwiPolicyNode(Node):
                 config_dict = json.load(f)
             
             # Remove deprecated fields that are not compatible with current LeRobot
-            deprecated_fields = ['use_peft', 'push_to_hub', 'repo_id', 'private', 'tags', 'license']
+            deprecated_fields = ['use_peft', 'push_to_hub', 'repo_id', 'private', 'tags', 'license',
+                                 'compile_model', 'compile_mode']
             removed_fields = []
             for field in deprecated_fields:
                 if field in config_dict:
@@ -301,17 +311,37 @@ class LeKiwiPolicyNode(Node):
             policy_cfg.device = self.get_parameter('device').value
             policy_cfg.use_amp = self.get_parameter('use_amp').value
             
+            # Apply rename_map to dataset metadata if provided
+            if self.rename_map:
+                original_features = self.dataset.meta.info["features"]
+                renamed_features = {}
+                for k, v in original_features.items():
+                    new_key = self.rename_map.get(k, k)
+                    renamed_features[new_key] = v
+                self.dataset.meta.info["features"] = renamed_features
+                self.get_logger().info(f'Renamed dataset features: {list(renamed_features.keys())}')
+            
             # Create policy
-            self.policy = make_policy(policy_cfg, ds_meta=self.dataset.meta)
+            self.policy = make_policy(policy_cfg, ds_meta=self.dataset.meta, rename_map=self.rename_map)
+            
+            # Build preprocessor overrides
+            preprocessor_overrides = {
+                "device_processor": {"device": policy_cfg.device},
+            }
+            if self.rename_map:
+                preprocessor_overrides["rename_observations_processor"] = {
+                    "rename_map": self.rename_map
+                }
             
             # Create preprocessor and postprocessor
+            dataset_stats = self.dataset.meta.stats
+            if self.rename_map:
+                dataset_stats = rename_stats(dataset_stats, self.rename_map)
             self.preprocessor, self.postprocessor = make_pre_post_processors(
                 policy_cfg=policy_cfg,
                 pretrained_path=self.policy_path,
-                dataset_stats=self.dataset.meta.stats,
-                preprocessor_overrides={
-                    "device_processor": {"device": policy_cfg.device},
-                },
+                dataset_stats=dataset_stats,
+                preprocessor_overrides=preprocessor_overrides,
             )
             
             self.get_logger().info('Policy loaded successfully!')
@@ -464,11 +494,18 @@ class LeKiwiPolicyNode(Node):
         
         # Add camera images - use simple keys without 'observation.images.' prefix
         # build_dataset_frame() will add the prefix automatically
+        # If rename_map is set, use renamed short keys (e.g., 'camera1' instead of 'front')
+        front_key = 'front'
+        wrist_key = 'wrist'
+        if self.rename_map:
+            front_key = self.rename_map.get('observation.images.front', 'observation.images.front').removeprefix('observation.images.')
+            wrist_key = self.rename_map.get('observation.images.wrist', 'observation.images.wrist').removeprefix('observation.images.')
+        
         if self.latest_front_image is not None:
-            obs['front'] = self.latest_front_image
+            obs[front_key] = self.latest_front_image
         
         if self.latest_wrist_image is not None:
-            obs['wrist'] = self.latest_wrist_image
+            obs[wrist_key] = self.latest_wrist_image
         
         return obs
     

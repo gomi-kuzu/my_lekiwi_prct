@@ -38,6 +38,7 @@ from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 
 
 def generate_launch_description():
@@ -106,6 +107,12 @@ def generate_launch_description():
         description='Rotate front camera image by 180 degrees'
     )
     
+    rename_map_arg = DeclareLaunchArgument(
+        'rename_map',
+        default_value='',
+        description='JSON string mapping dataset feature names to policy feature names (e.g., {"observation.images.front": "observation.images.camera1"})'
+    )
+    
     # Create policy node
     policy_node = Node(
         package='lekiwi_ros2_teleop',
@@ -123,6 +130,7 @@ def generate_launch_description():
             'rotate_front_camera': LaunchConfiguration('rotate_front_camera'),
             'device': LaunchConfiguration('device'),
             'use_amp': LaunchConfiguration('use_amp'),
+            'rename_map': ParameterValue(LaunchConfiguration('rename_map'), value_type=str),
         }],
         emulate_tty=True,
     )
@@ -139,6 +147,7 @@ def generate_launch_description():
         robot_port_arg,
         use_degrees_arg,
         rotate_front_camera_arg,
+        rename_map_arg,
         # Nodes
         policy_node,
     ])
