@@ -75,7 +75,7 @@ class LeKiwiROS2TeleopClient(Node):
         self.declare_parameter('leader_arm_port', '/dev/tty.usbmodem585A0077581')
         self.declare_parameter('leader_arm_id', 'my_leader_arm')
         self.declare_parameter('keyboard_id', 'my_keyboard')
-        self.declare_parameter('control_frequency', 50.0)
+        self.declare_parameter('control_frequency', 30.0)
         self.declare_parameter('use_rerun', False)
         self.declare_parameter('use_keyboard', True)  # Enable/disable keyboard teleop
         

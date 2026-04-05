@@ -31,6 +31,7 @@ build/
 *.swp
 *.swo
 *~
+*.tmp.txt
 
 # Environment variables (local settings)
 .env

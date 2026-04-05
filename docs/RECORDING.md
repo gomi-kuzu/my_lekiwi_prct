@@ -34,7 +34,7 @@ source install/setup.bash
 ros2 run lekiwi_ros2_teleop lekiwi_ros2_teleop_client \
     --ros-args \
     -p leader_arm_port:=/dev/ttyACM0 \
-    -p control_frequency:=50.0 \
+    -p control_frequency:=30.0 \
     -p use_keyboard:=false
 ```
 

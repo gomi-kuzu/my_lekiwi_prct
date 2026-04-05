@@ -263,7 +263,7 @@ self.get_logger().info('==========================')
 #### 4.1 デフォルト値の設定
 ```python
 # 安全で実用的なデフォルト値を設定
-self.declare_parameter('control_frequency', 50.0)  # LeKiwiの実測値
+self.declare_parameter('control_frequency', 30.0)  # LeKiwiの実測値
 self.declare_parameter('device', 'cuda')           # GPU優先
 self.declare_parameter('use_amp', False)           # 安定性優先
 self.declare_parameter('rotate_front_camera', True) # ハードウェア依存
@@ -555,9 +555,9 @@ ros2 launch lekiwi_ros2_teleop lekiwi_policy.launch.py \
 
 #### オプションパラメータ
 
-- `control_frequency` (float, default: 50.0): 制御周波数（Hz）
+- `control_frequency` (float, default: 30.0): 制御周波数（Hz）
   - 範囲: 1.0 - 100.0
-  - 推奨: 50.0（LeKiwiの実測最適値）
+  - 推奨: 30.0（LeKiwiの実測最適値）
 ```
 
 #### 2.4 トラブルシューティングセクション
@@ -975,7 +975,7 @@ export ROS_DOMAIN_ID=42
 ros2 run lekiwi_ros2_teleop lekiwi_teleop_node \
   --ros-args \
   -p robot_port:=/dev/ttyACM0 \
-  -p control_frequency:=50.0
+  -p control_frequency:=30.0
 ```
 
 #### Desktop PC推論起動スクリプト
@@ -990,7 +990,7 @@ export ROS_LOCALHOST_ONLY=0
 ros2 launch lekiwi_ros2_teleop lekiwi_policy.launch.py \
   policy_path:="$HOME/outputs/train/latest/checkpoints/best" \
   dataset_repo_id:=gomi-kuzu/lekiwi_pick_place \
-  control_frequency:=50.0 \
+  control_frequency:=30.0 \
   device:=cuda
 ```
 
