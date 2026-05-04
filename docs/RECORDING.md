@@ -1,6 +1,6 @@
 # LeKiwi ROS2 Data Recording
 
-このパッケージには、LeKiwiロボットのテレオペレーションデータをLeRobot Dataset v3形式で記録するためのROS2ノードが含まれています。
+このパッケージには、LeKiwiロボットのテレオペレーションデータをLeRobot Dataset v3形式で記録するためのROS2ノードが含まれている。
 
 ## ファイル構成
 
@@ -19,7 +19,7 @@ export LEKIWI_REMOTE_IP="172.18.134.136"  # LeKiwiロボットのIPアドレス
 
 2. パッケージをビルド:
 ```bash
-cd /home/inoma/jazzy_ws
+cd $HOME/jazzy_ws
 colcon build --packages-select lekiwi_ros2_teleop
 source install/setup.bash
 ```
@@ -234,9 +234,9 @@ python3 src/lekiwi_ros2_teleop/lekiwi_ros2_teleop/upload_dataset.py \
 新しいデータセットを作成する場合、または画像解像度などのフィーチャー定義を変更した場合は、既存のデータセットディレクトリを削除してください：
 
 ```bash
-rm -rf /home/inoma/lerobot_datasets/username/my_dataset
+rm -rf $HOME/lerobot_datasets/username/my_dataset
 # または全てのデータセットを削除する場合
-rm -rf /home/inoma/lerobot_datasets
+rm -rf $HOME/lerobot_datasets
 ```
 
 **注意**: この操作により既存のデータが削除されます。必要なデータは事前にバックアップしてください。
@@ -313,7 +313,7 @@ lerobot-dataset-viz \
 ```
 python src/lekiwi_ros2_teleop/lekiwi_ros2_teleop/lekiwi_dataset_viz.py   --repo-id  [dataset path]  --episode-index 1
 ```
-### データセットのトレーニングでの使用
+<!-- ### データセットのトレーニングでの使用
 
 データセットは正しく保存されているため、トレーニングには問題なく使用できます：
 
@@ -323,7 +323,7 @@ lerobot-train \
     policy=act \
     env=real_world \
     dataset.repo_id=username/my_dataset \
-    dataset.root=~/lerobot_datasets
+    dataset.root=~/lerobot_datasets -->
 ```
 
 ## 参考リンク

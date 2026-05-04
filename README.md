@@ -19,7 +19,7 @@ ROS2を使用したLeKiwiロボットのテレオペレーションと推論な�
 ## データ記録
 
 テレオペレーション中のデータを記録してVLAモデルのトレーニング用データセットを作成できる。
-詳細な使用方法、トラブルシューティング、Hugging Faceへのアップロード方法については、[docs/RECORDING.md](docs/RECORDING.md)を参照すること。
+より詳細な使用方法やトラブルシューティングについては、[docs/RECORDING.md](docs/RECORDING.md)を参照すること。
 
 **クイックスタート:**
 
@@ -174,7 +174,7 @@ ros2 service call /lekiwi_data_recorder/save_dataset std_srvs/srv/Trigger
   - `angular.z`: 回転速度 (rad/s)
 
 - `/lekiwi/arm_joint_commands` (sensor_msgs/JointState): アーム関節位置コマンド
-  - 6つの関節位置が必要だ
+  - 6つの関節位置
 
 ### Publish (配信)
 
@@ -323,9 +323,7 @@ ros2 run lekiwi_ros2_teleop lekiwi_teleop_node \
 
 対処法：
 - 2台のカメラを**異なるUSBコントローラー**（`xhci-hcd.0` と `xhci-hcd.1`）に分けて接続する
-- またはFPSを下げる: `-p camera_fps:=15`
-
-`lsusb -t` でバス構成を確認し、カメラが異なる `Bus` に接続されていることが理想だ。
+    - `lsusb -t` でバス構成を確認し、カメラが異なる `Bus` に接続されていることが理想。
 
 ---
 
@@ -333,28 +331,13 @@ ros2 run lekiwi_ros2_teleop lekiwi_teleop_node \
 
 #### LEROBOT_PATH
 
-両方のノードで必要だ。LeRobotのパスを環境変数として設定する。
+LeRobotのパスを環境変数として設定する。
 シェルの設定ファイルを編集すること：
 
 **bashの場合 (`~/.bashrc`):**
 ```bash
 # LeRobotの設定（パスを適宜置き換えること）
 export LEROBOT_PATH="/path/to/your/lerobot/src"
-```
-
-**zshの場合 (`~/.zshrc`):**
-```bash
-# LeRobotの設定（パスを適宜置き換えること）
-export LEROBOT_PATH="/path/to/your/lerobot/src"
-```
-
-**例:**
-```bash
-# LeRobotを ~/study/lerobot にインストールした場合
-export LEROBOT_PATH="$HOME/study/lerobot/src"
-
-# 別の場所にインストールした場合
-export LEROBOT_PATH="/opt/lerobot/src"
 ```
 
 #### LEKIWI_REMOTE_IP（lekiwi_ros2_teleop_clientで必須）
@@ -371,7 +354,7 @@ export LEKIWI_REMOTE_IP="172.18.134.136"
 source ~/.bashrc  # または source ~/.zshrc
 ```
 
-### 2. 環境変数の確認
+<!-- ### 2. 環境変数の確認
 
 正しく設定されているか確認する：
 ```bash
@@ -382,32 +365,9 @@ echo $LEKIWI_REMOTE_IP
 # 出力例: 172.18.134.136
 ```
 
-**注意**: 環境変数が設定されていない場合、ノードの起動時にエラーが発生する。
+**注意**: 環境変数が設定されていない場合、ノードの起動時にエラーが発生する。 -->
 
 ## ビルド
-
-### 環境変数の設定（推奨）
-
-VLAノードを使用する前に、LeRobotのパスを環境変数として設定することを推奨する。
-`~/.bashrc`または`~/.zshrc`に以下を追加すること：
-
-```bash
-# LeRobotのパスを設定（環境に合わせて適宜変更すること）
-export LEROBOT_PATH="/path/to/your/lerobot/src"
-```
-
-設定後、以下のコマンドで反映させる：
-
-```bash
-source ~/.bashrc  # bashの場合
-# または
-source ~/.zshrc   # zshの場合
-```
-
-<!-- **重要**: `LEROBOT_PATH`環境変数が設定されていないと、VLAノードは起動できません。 -->
-
-### ビルド手順
-
 ```bash
 cd [ros2のワークスペース]
 colcon build --packages-select lekiwi_ros2_teleop
@@ -423,7 +383,7 @@ source install/setup.bash
 > source install/setup.bash
 > ```
 
-### 1. テレオペレーション（Leader Arm + Keyboard）
+### 1. テレオペレーション
 
 #### ターミナル1: LeKiwi上でlekiwi_teleop_nodeを起動
 
@@ -502,6 +462,12 @@ ros2 run teleop_twist_keyboard teleop_twist_keyboard \
 - キーを押し続ける必要はない。一度押せば継続的に動作する
 - 停止するには**k**キーを押すこと
 
+
+- ※joyコンで操作することも可能
+    - その場合は`teleop_twist_keyboard`の代わりに以下を起動
+```bash
+ros2 launch lekiwi_ros2_teleop custom_teleop.launch.py
+```
 #### 動作確認
 
 別のターミナルで以下のコマンドを実行して、cmd_velトピックが配信されているか確認できる：
@@ -514,7 +480,7 @@ ros2 topic echo /lekiwi/cmd_vel
 ros2 topic hz /lekiwi/cmd_vel
 ```
 
-teleop_twist_keyboardでキーを押したときに、`/lekiwi/cmd_vel`にメッセージが配信されていれば正常だ。
+<!-- teleop_twist_keyboardでキーを押したときに、`/lekiwi/cmd_vel`にメッセージが配信されていれば正常。 -->
 
 <!--
 ### 2. VLA自律制御
@@ -657,22 +623,20 @@ ros2 run lekiwi_ros2_teleop lekiwi_vla_node \
 
 ### 環境変数
 
-- `LEROBOT_PATH` (**必須**): LeRobotライブラリのsrcディレクトリへのパス
-  - 例: `export LEROBOT_PATH="$HOME/study/lerobot/src"`
-  - 例: `export LEROBOT_PATH="/opt/lerobot/src"`
-  
+- `LEROBOT_PATH` (**必須**): LeRobotライブラリのsrcディレクトリへのパス  
 - `LEKIWI_REMOTE_IP` (lekiwi_ros2_teleop_clientで必須): LeKiwiロボットのIPアドレス
-  - 例: `export LEKIWI_REMOTE_IP="172.18.134.136"`
-  
+
 **注意**: 環境変数が設定されていないと、各ノードは起動時にエラーを出力する。
 
-## 参考リンク
+<!--
+ ## 参考リンク
 
 - **LeRobot GitHub**: https://github.com/huggingface/lerobot
 - **LeRobot HuggingFace**: https://huggingface.co/lerobot
 - **SmolVLA論文**: https://arxiv.org/abs/2506.01844
 - **LeRobot ドキュメント**: https://huggingface.co/docs/lerobot
-- **LeRobot Discord**: https://discord.gg/s3KuuzsPFb
+- **LeRobot Discord**: https://discord.gg/s3KuuzsPFb 
+-->
 
 ## ライセンス
 
