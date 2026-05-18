@@ -49,6 +49,99 @@ if lerobot_path not in sys.path:
 
 from lerobot.robots.lekiwi.config_lekiwi import LeKiwiConfig
 from lerobot.robots.lekiwi.lekiwi import LeKiwi
+from lerobot.motors import Motor, MotorNormMode
+from lerobot.motors.feetech import FeetechMotorsBus, OperatingMode
+from lerobot.cameras.utils import make_cameras_from_configs
+from lerobot.utils.errors import DeviceAlreadyConnectedError, DeviceNotConnectedError
+
+
+class LeKiwiArmOnly(LeKiwi):
+    """LeKiwi subclass that operates only the arm (motors 1-6), without the mobile base."""
+
+    def __init__(self, config: LeKiwiConfig):
+        # Call Robot.__init__ (grandparent), skipping LeKiwi.__init__ to avoid base motors
+        from lerobot.robots.robot import Robot
+        Robot.__init__(self, config)
+        self.config = config
+        norm_mode_body = MotorNormMode.DEGREES if config.use_degrees else MotorNormMode.RANGE_M100_100
+        self.bus = FeetechMotorsBus(
+            port=self.config.port,
+            motors={
+                "arm_shoulder_pan": Motor(1, "sts3215", norm_mode_body),
+                "arm_shoulder_lift": Motor(2, "sts3215", norm_mode_body),
+                "arm_elbow_flex": Motor(3, "sts3215", norm_mode_body),
+                "arm_wrist_flex": Motor(4, "sts3215", norm_mode_body),
+                "arm_wrist_roll": Motor(5, "sts3215", norm_mode_body),
+                "arm_gripper": Motor(6, "sts3215", MotorNormMode.RANGE_0_100),
+            },
+            calibration=self.calibration,
+        )
+        self.arm_motors = list(self.bus.motors.keys())
+        self.base_motors = []
+        self.cameras = make_cameras_from_configs(config.cameras)
+
+    def configure(self):
+        """Configure only arm motors (skip base motor velocity mode setup)."""
+        self.bus.disable_torque()
+        self.bus.configure_motors()
+        for name in self.arm_motors:
+            self.bus.write("Operating_Mode", name, OperatingMode.POSITION.value)
+            self.bus.write("P_Coefficient", name, 16)
+            self.bus.write("I_Coefficient", name, 0)
+            self.bus.write("D_Coefficient", name, 32)
+        self.bus.enable_torque()
+
+    def get_observation(self):
+        """Read arm positions only (no base wheel velocities)."""
+        if not self.is_connected:
+            raise DeviceNotConnectedError(f"{self} is not connected.")
+
+        import time
+        import logging
+        logger = logging.getLogger(__name__)
+
+        start = time.perf_counter()
+        arm_pos = self.bus.sync_read("Present_Position", self.arm_motors)
+        dt_ms = (time.perf_counter() - start) * 1e3
+        logger.debug(f"{self} read state: {dt_ms:.1f}ms")
+
+        obs_dict = {f"{k}.pos": v for k, v in arm_pos.items()}
+
+        for cam_key, cam in self.cameras.items():
+            start = time.perf_counter()
+            obs_dict[cam_key] = cam.async_read()
+            dt_ms = (time.perf_counter() - start) * 1e3
+            logger.debug(f"{self} read {cam_key}: {dt_ms:.1f}ms")
+
+        return obs_dict
+
+    def send_action(self, action):
+        """Send arm position commands only (ignore base velocity keys)."""
+        if not self.is_connected:
+            raise DeviceNotConnectedError(f"{self} is not connected.")
+
+        arm_goal_pos = {k: v for k, v in action.items() if k.endswith(".pos")}
+
+        if self.config.max_relative_target is not None:
+            from lerobot.robots.utils import ensure_safe_goal_position
+            present_pos = self.bus.sync_read("Present_Position", self.arm_motors)
+            goal_present_pos = {key: (g_pos, present_pos[key]) for key, g_pos in arm_goal_pos.items()}
+            arm_goal_pos = ensure_safe_goal_position(goal_present_pos, self.config.max_relative_target)
+
+        arm_goal_pos_raw = {k.replace(".pos", ""): v for k, v in arm_goal_pos.items()}
+        self.bus.sync_write("Goal_Position", arm_goal_pos_raw)
+        return arm_goal_pos
+
+    def stop_base(self):
+        """No-op: no base motors in arm-only mode."""
+        pass
+
+    def disconnect(self):
+        if not self.is_connected:
+            raise DeviceNotConnectedError(f"{self} is not connected.")
+        self.bus.disconnect(self.config.disable_torque_on_disconnect)
+        for cam in self.cameras.values():
+            cam.disconnect()
 
 
 class LeKiwiTeleopNode(Node):
@@ -97,6 +190,7 @@ class LeKiwiTeleopNode(Node):
         self.declare_parameter('wrist_camera_height', 640)  # Wrist camera height
         self.declare_parameter('enable_cameras', True)  # Allow disabling cameras for debugging
         self.declare_parameter('allow_camera_failure', True)  # Continue robot operation even if cameras fail
+        self.declare_parameter('arm_only_mode', False)  # Arm-only mode: disable base and cameras
         
         # Get parameters
         robot_port = self.get_parameter('robot_port').value
@@ -113,6 +207,11 @@ class LeKiwiTeleopNode(Node):
         wrist_camera_height = self.get_parameter('wrist_camera_height').value
         self.enable_cameras = self.get_parameter('enable_cameras').value
         allow_camera_failure = self.get_parameter('allow_camera_failure').value
+        self.arm_only_mode = self.get_parameter('arm_only_mode').value
+        self._robot_class = LeKiwiArmOnly if self.arm_only_mode else LeKiwi
+        if self.arm_only_mode:
+            self.enable_cameras = False
+            self.get_logger().info('Arm-only mode enabled: base and cameras are disabled')
         
         # Configure robot
         self.get_logger().info('Configuring LeKiwi robot...')
@@ -147,7 +246,7 @@ class LeKiwiTeleopNode(Node):
             robot_config.cameras = {}
             self.get_logger().info('Cameras disabled')
         
-        self.robot = LeKiwi(robot_config)
+        self.robot = self._robot_class(robot_config)
         
         # Connect to robot with camera fallback handling
         self.get_logger().info('Connecting to LeKiwi robot...')
@@ -188,7 +287,7 @@ class LeKiwiTeleopNode(Node):
                             robot_config.cameras['front'].index_or_path = fallback_device
                         else:
                             robot_config.cameras['wrist'].index_or_path = fallback_device
-                        self.robot = LeKiwi(robot_config)
+                        self.robot = self._robot_class(robot_config)
                         self.robot.connect()
                         self.get_logger().info(f'Connected with {failed_camera} camera: {fallback_device}')
                         connected = True
@@ -202,7 +301,7 @@ class LeKiwiTeleopNode(Node):
                     self.get_logger().warn('All camera devices failed. Trying without cameras...')
                     try:
                         robot_config.cameras = {}
-                        self.robot = LeKiwi(robot_config)
+                        self.robot = self._robot_class(robot_config)
                         self.robot.connect()
                         self.get_logger().warn('=' * 60)
                         self.get_logger().warn('WARNING: LeKiwi robot connected WITHOUT CAMERAS!')
@@ -273,12 +372,13 @@ class LeKiwiTeleopNode(Node):
         )
         
         # Create subscribers
-        self.cmd_vel_sub = self.create_subscription(
-            Twist,
-            '/lekiwi/cmd_vel',
-            self.cmd_vel_callback,
-            qos_profile
-        )
+        if not self.arm_only_mode:
+            self.cmd_vel_sub = self.create_subscription(
+                Twist,
+                '/lekiwi/cmd_vel',
+                self.cmd_vel_callback,
+                qos_profile
+            )
         
         self.arm_cmd_sub = self.create_subscription(
             JointState,
@@ -353,20 +453,24 @@ class LeKiwiTeleopNode(Node):
             time_since_last_cmd = (now - self.last_cmd_time).nanoseconds / 1e9
             
             if time_since_last_cmd > (self.watchdog_timeout_ms / 1000.0) and not self.watchdog_active:
-                self.get_logger().warn(
-                    f'Command not received for more than {self.watchdog_timeout_ms} ms. Stopping the base.'
-                )
                 self.watchdog_active = True
-                self.robot.stop_base()
-                # Reset base velocities
-                self.last_base_velocities = {
-                    "x.vel": 0.0,
-                    "y.vel": 0.0,
-                    "theta.vel": 0.0,
-                }
+                if not self.arm_only_mode:
+                    self.get_logger().warn(
+                        f'Command not received for more than {self.watchdog_timeout_ms} ms. Stopping the base.'
+                    )
+                    self.robot.stop_base()
+                    # Reset base velocities
+                    self.last_base_velocities = {
+                        "x.vel": 0.0,
+                        "y.vel": 0.0,
+                        "theta.vel": 0.0,
+                    }
             
             # Combine arm and base commands
-            action = {**self.last_arm_positions, **self.last_base_velocities}
+            if self.arm_only_mode:
+                action = {**self.last_arm_positions}
+            else:
+                action = {**self.last_arm_positions, **self.last_base_velocities}
             
             # Send action to robot
             self.robot.send_action(action)
@@ -482,7 +586,7 @@ class LeKiwiTeleopNode(Node):
                             self.robot_config.cameras['wrist'].index_or_path = wrist_device
                         
                         # Create new robot instance
-                        self.robot = LeKiwi(self.robot_config)
+                        self.robot = self._robot_class(self.robot_config)
                         self.robot.connect()
                         
                         self.get_logger().info(f'Reconnected with front: {front_device}, wrist: {wrist_device}')
@@ -499,7 +603,7 @@ class LeKiwiTeleopNode(Node):
                 self.get_logger().warn('All camera combinations failed. Reconnecting without cameras...')
                 try:
                     self.robot_config.cameras = {}
-                    self.robot = LeKiwi(self.robot_config)
+                    self.robot = self._robot_class(self.robot_config)
                     self.robot.connect()
                     self.enable_cameras = False
                     self.get_logger().warn('Reconnected WITHOUT cameras')
