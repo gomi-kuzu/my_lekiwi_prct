@@ -227,11 +227,11 @@ class LeKiwiTeleopNode(Node):
         
         # Initialize last action state
         self.last_arm_positions = {
-            "arm_shoulder_pan.pos": -5.0,
+            "arm_shoulder_pan.pos": 0.0,
             "arm_shoulder_lift.pos": -78.0,
             "arm_elbow_flex.pos": 82.0,
             "arm_wrist_flex.pos": 62.0,
-            "arm_wrist_roll.pos": 2.5,
+            "arm_wrist_roll.pos": 0.0,
             "arm_gripper.pos": 1.5,
         }
         self.last_base_velocities = {
