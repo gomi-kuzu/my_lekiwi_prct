@@ -19,18 +19,28 @@ Design goals:
 
 from __future__ import annotations
 
+import json
 import os
 import signal
 import subprocess
 import time
+import uuid
 import yaml
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional
 
 import rclpy
 from rclpy.node import Node
 from std_srvs.srv import Trigger
+
+from .lekiwi_metadata import (
+    build_signal_spec,
+    hash_bag_dir,
+    package_git_info,
+    software_snapshot,
+    workspace_git_info,
+)
 
 
 DEFAULT_TOPICS: List[str] = [
@@ -60,6 +70,16 @@ class LeKiwiBagRecorder(Node):
         self.declare_parameter("storage_id", "mcap")
         # Optional extra args passed verbatim to `ros2 bag record`.
         self.declare_parameter("extra_record_args", [""])
+        # Free-form provenance fields
+        self.declare_parameter("operator", "")
+        self.declare_parameter("location", "")
+        self.declare_parameter("note", "")
+        # Hardware/environment provenance (best-effort strings)
+        self.declare_parameter("lekiwi_remote_ip", "")
+        self.declare_parameter("leader_arm_port", "")
+        self.declare_parameter("arm_calibration_file", "")
+        self.declare_parameter("front_camera_id", "")
+        self.declare_parameter("wrist_camera_id", "")
 
         self.output_root = Path(
             self.get_parameter("output_root").value).expanduser().resolve()
@@ -77,19 +97,61 @@ class LeKiwiBagRecorder(Node):
         self.session_dir = self.output_root / session_name
         self.session_dir.mkdir(parents=True, exist_ok=True)
 
+        self.session_uuid = str(uuid.uuid4())
+
+        # Collect provenance snapshots (once per session).
+        pkg_git = package_git_info()
+        ws_git = workspace_git_info()
+        software = software_snapshot()
+
+        operator = self.get_parameter("operator").value
+        location = self.get_parameter("location").value
+        note = self.get_parameter("note").value
+
+        hardware = {
+            "lekiwi_remote_ip": self.get_parameter("lekiwi_remote_ip").value,
+            "leader_arm_port": self.get_parameter("leader_arm_port").value,
+            "arm_calibration_file":
+                self.get_parameter("arm_calibration_file").value,
+            "front_camera_id": self.get_parameter("front_camera_id").value,
+            "wrist_camera_id": self.get_parameter("wrist_camera_id").value,
+        }
+
         # Write session-level meta
         session_meta = {
             "session_name": session_name,
-            "created_at": datetime.now().isoformat(timespec="seconds"),
+            "session_uuid": self.session_uuid,
+            "created_at": datetime.now(timezone.utc).isoformat(
+                timespec="seconds"),
             "robot_type": self.robot_type,
             "target_fps": self.target_fps,
             "single_task": self.single_task,
             "topics": self.topics,
             "storage_id": self.storage_id,
+            "operator": operator,
+            "location": location,
+            "note": note,
+            "hardware": hardware,
+            "signal_spec": build_signal_spec(),
         }
         with (self.session_dir / "session.yaml").open("w") as f:
             yaml.safe_dump(session_meta, f, sort_keys=False,
                            allow_unicode=True)
+
+        # Write software / git provenance as JSON (machine-only).
+        with (self.session_dir / "software.json").open("w") as f:
+            json.dump({
+                "software": software,
+                "git_package": pkg_git,
+                "git_workspace": ws_git,
+            }, f, indent=2, ensure_ascii=False)
+
+        # Persist dirty diffs if present (small, invaluable for reproducibility)
+        if pkg_git.get("diff"):
+            (self.session_dir / "git_package.diff").write_text(pkg_git["diff"])
+        if ws_git.get("diff"):
+            (self.session_dir /
+             "git_workspace.diff").write_text(ws_git["diff"])
 
         # Services
         self.create_service(Trigger, "~/start_episode",
@@ -146,12 +208,15 @@ class LeKiwiBagRecorder(Node):
 
         # Write per-episode meta upfront (start time gets filled at stop)
         ep_meta = {
+            "session_uuid": self.session_uuid,
             "episode_index": self._episode_index,
+            "episode_uuid": str(uuid.uuid4()),
             "single_task": self.single_task,
             "robot_type": self.robot_type,
             "target_fps": self.target_fps,
             "topics": self.topics,
-            "start_time": datetime.now().isoformat(timespec="seconds"),
+            "start_time": datetime.now(timezone.utc).isoformat(
+                timespec="seconds"),
         }
         with (ep_dir / "episode.yaml").open("w") as f:
             yaml.safe_dump(ep_meta, f, sort_keys=False, allow_unicode=True)
@@ -215,11 +280,20 @@ class LeKiwiBagRecorder(Node):
 
         # Update episode meta with stop info.
         meta_path = self._current_episode_dir / "episode.yaml"
+        bag_dir = self._current_episode_dir / "bag"
         try:
             with meta_path.open() as f:
                 meta = yaml.safe_load(f) or {}
-            meta["stop_time"] = datetime.now().isoformat(timespec="seconds")
+            meta["stop_time"] = datetime.now(timezone.utc).isoformat(
+                timespec="seconds")
             meta["duration_sec"] = round(duration, 3)
+            # Compute content hashes so downstream provenance can pin the raw.
+            try:
+                meta["bag_sha256"] = hash_bag_dir(bag_dir)
+            except Exception as e:  # noqa: BLE001
+                self.get_logger().warn(
+                    f"Failed to hash bag contents: {e}")
+                meta["bag_sha256"] = {}
             with meta_path.open("w") as f:
                 yaml.safe_dump(meta, f, sort_keys=False, allow_unicode=True)
         except Exception as e:  # noqa: BLE001

@@ -58,6 +58,25 @@ def generate_launch_description():
         'storage_id', default_value='mcap',
         description='rosbag2 storage plugin id.')
 
+    operator_arg = DeclareLaunchArgument(
+        'operator', default_value='',
+        description='Operator name (recorded in session.yaml).')
+    location_arg = DeclareLaunchArgument(
+        'location', default_value='',
+        description='Recording location (recorded in session.yaml).')
+    note_arg = DeclareLaunchArgument(
+        'note', default_value='',
+        description='Freeform note (recorded in session.yaml).')
+    arm_calibration_file_arg = DeclareLaunchArgument(
+        'arm_calibration_file', default_value='',
+        description='Path to arm calibration file (stored as provenance).')
+    front_camera_id_arg = DeclareLaunchArgument(
+        'front_camera_id', default_value='',
+        description='Front camera identifier/serial (provenance).')
+    wrist_camera_id_arg = DeclareLaunchArgument(
+        'wrist_camera_id', default_value='',
+        description='Wrist camera identifier/serial (provenance).')
+
     teleop_node = Node(
         package='lekiwi_ros2_teleop',
         executable='lekiwi_ros2_teleop_client',
@@ -84,6 +103,15 @@ def generate_launch_description():
             'robot_type': LaunchConfiguration('robot_type'),
             'target_fps': LaunchConfiguration('target_fps'),
             'storage_id': LaunchConfiguration('storage_id'),
+            'operator': LaunchConfiguration('operator'),
+            'location': LaunchConfiguration('location'),
+            'note': LaunchConfiguration('note'),
+            'lekiwi_remote_ip': LaunchConfiguration('lekiwi_remote_ip'),
+            'leader_arm_port': LaunchConfiguration('leader_arm_port'),
+            'arm_calibration_file':
+                LaunchConfiguration('arm_calibration_file'),
+            'front_camera_id': LaunchConfiguration('front_camera_id'),
+            'wrist_camera_id': LaunchConfiguration('wrist_camera_id'),
         }],
     )
 
@@ -99,6 +127,12 @@ def generate_launch_description():
         target_fps_arg,
         robot_type_arg,
         storage_id_arg,
+        operator_arg,
+        location_arg,
+        note_arg,
+        arm_calibration_file_arg,
+        front_camera_id_arg,
+        wrist_camera_id_arg,
         teleop_node,
         bag_recorder_node,
     ])

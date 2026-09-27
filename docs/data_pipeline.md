@@ -1,0 +1,420 @@
+# LeKiwi データパイプライン設計
+
+このドキュメントは、LeKiwi ロボットの模倣学習用データを **収集 → フォーマッティング → キュレーション → 検証** の 4 ステージで扱うためのアーキテクチャ、責務分離、実装方針、使い方をまとめたものです。
+
+キュレーションと検証は今後追加する後工程で、本ドキュメントでは章だけ確保し、具体スペックは順次埋めていきます。
+
+---
+
+## 目次
+
+1. [設計原則](#1-設計原則)
+2. [パイプライン全体像](#2-パイプライン全体像)
+3. [ステージ 1: 収集 (Recording)](#3-ステージ-1-収集-recording)
+4. [ステージ 2: フォーマッティング (Formatting)](#4-ステージ-2-フォーマッティング-formatting)
+5. [ステージ 3: キュレーション (Curation) — 予定](#5-ステージ-3-キュレーション-curation--予定)
+6. [ステージ 4: 検証 (Validation) — 予定](#6-ステージ-4-検証-validation--予定)
+7. [メタデータ / プロヴェナンス設計](#7-メタデータ--プロヴェナンス設計)
+8. [ディレクトリレイアウト](#8-ディレクトリレイアウト)
+9. [使い方チートシート](#9-使い方チートシート)
+10. [トラブルシューティング](#10-トラブルシューティング)
+
+---
+
+## 1. 設計原則
+
+- **Raw first, format later**: リアルタイム側は取りこぼしゼロを最優先し、生データ (`ros2 bag record`, MCAP) を保存する。時刻同期・特徴量定義・エンコード方式・正規化は後工程でいくらでも作り直す。
+- **単一の Signal Spec**: 単位、座標系、absolute/relative、gripper 表現、前処理有無を [lekiwi_metadata.py](../lekiwi_ros2_teleop/lekiwi_metadata.py) 内の `build_signal_spec()` に一元化し、収集・変換の両方から参照する。SIGNAL_SPEC_VERSION が破壊的変更のトリガ。
+- **プロヴェナンス必須**: どの生 bag から、どのコード commit で、どんなパラメータで生成された dataset かを常に辿れるようにする（[§7](#7-メタデータ--プロヴェナンス設計)）。
+- **info.json は汚さない**: LeRobot 標準 `meta/info.json` には独自情報を単一トップレベルキー `x_lekiwi` にまとめてのみ注入する。詳細は `provenance/` サブディレクトリに置く。
+- **決定性**: 同じ raw + 同じメタ + 同じコード → 同じ dataset。乱数を使う工程では seed を必ずメタに残す。
+- **後段の変更が前段を壊さない**: 各ステージの成果物は次のステージの読み取り専用入力とみなす。
+
+---
+
+## 2. パイプライン全体像
+
+```mermaid
+flowchart LR
+  T[Teleop nodes] --> R
+  R[Stage1<br/>lekiwi_bag_recorder<br/>MCAP + session/episode meta] --> F
+  F[Stage2<br/>rosbag_to_lerobot<br/>LeRobot v3 + provenance] --> C
+  C[Stage3<br/>Curation<br/>filter / relabel / augment] --> V
+  V[Stage4<br/>Validation<br/>schema, dist shift, replay] --> Train[Training]
+```
+
+| ステージ | 入力 | 出力 | 主な責務 |
+|---|---|---|---|
+| 1. 収集 | ROS2 トピック | MCAP bag + `session.yaml` + `episode.yaml` + `software.json` | raw を落とさず、環境・機材・コード状態を記録 |
+| 2. フォーマッティング | Stage 1 のセッション | LeRobot Dataset v3 + `provenance/` | 時刻同期、特徴量定義、動画エンコード、プロヴェナンス生成 |
+| 3. キュレーション | Stage 2 の dataset | 別 repo_id の dataset + キュレーション記録 | エピソード選別、ラベル修正、拡張、split 割当（**予定**） |
+| 4. 検証 | Stage 3 の dataset | 検証レポート | スキーマ/分布/リプレイ整合性チェック（**予定**） |
+
+---
+
+## 3. ステージ 1: 収集 (Recording)
+
+### 3.1 責務
+
+- ROS2 テレオペのトピックを **CompressedImage のまま** MCAP に書く。動画エンコード等はしない。
+- エピソード境界（1 bag = 1 episode）を明確化。
+- 収集時の環境情報とコード状態を保存し、後段が完全に再構築できるようにする。
+
+### 3.2 実装
+
+- ノード: [lekiwi_bag_recorder.py](../lekiwi_ros2_teleop/lekiwi_bag_recorder.py) (`ros2 run lekiwi_ros2_teleop lekiwi_bag_recorder`)
+- Launch: [lekiwi_bag_record.launch.py](../launch/lekiwi_bag_record.launch.py)
+- 内部で `ros2 bag record -s mcap -o <ep_dir>/bag <topics...>` を subprocess 起動し、`stop_episode` サービスで SIGINT を送って正常終了させる。
+
+### 3.3 記録するトピック（デフォルト）
+
+- `/lekiwi/joint_states`
+- `/lekiwi/cmd_vel`
+- `/lekiwi/arm_joint_commands`
+- `/lekiwi/camera/front/image_raw/compressed`
+- `/lekiwi/camera/wrist/image_raw/compressed`
+
+タイムスタンプは各メッセージの `header.stamp` を第一に、無い場合は bag 受信時刻をフォールバックとして使う。
+
+### 3.4 サービス
+
+| サービス | 型 | 挙動 |
+|---|---|---|
+| `~/start_episode` | `std_srvs/Trigger` | 新しい `episode_XXXXXX/` を作り bag 録画を開始 |
+| `~/stop_episode` | `std_srvs/Trigger` | bag を finalize、`bag_sha256` を計算、`episode.yaml` を更新 |
+
+### 3.5 前提: MCAP ストレージプラグイン
+
+```bash
+sudo apt install ros-jazzy-rosbag2-storage-mcap
+```
+
+### 3.6 基本コマンド
+
+```bash
+ros2 launch lekiwi_ros2_teleop lekiwi_bag_record.launch.py \
+    launch_teleop:=false \
+    output_root:=$HOME/lekiwi_bags \
+    single_task:="Pick and place the bottle cap" \
+    target_fps:=30 \
+    operator:="inoma" \
+    location:="lab_A" \
+    note:="lighting: overhead LED, run 3" \
+    front_camera_id:="realsense_D435_serial123" \
+    wrist_camera_id:="usbcam_v2_serial456" \
+    arm_calibration_file:="$HOME/.lekiwi/leader_arm.json"
+```
+
+```bash
+ros2 service call /lekiwi_bag_recorder/start_episode std_srvs/srv/Trigger
+# ... テレオペ実演 ...
+ros2 service call /lekiwi_bag_recorder/stop_episode  std_srvs/srv/Trigger
+```
+
+---
+
+## 4. ステージ 2: フォーマッティング (Formatting)
+
+### 4.1 責務
+
+- Stage 1 の raw bag を LeRobot Dataset v3 に変換する。
+- **時刻同期**を厳密に扱う（`header.stamp` ベースの最近傍/補間）。
+- **同期ズレの許容幅**、**基準トピック**、**action lag** をパラメータ化。
+- 変換前に「このパラメータでどれだけフレームが棄却されるか」を可視化する `analyze` モードを提供する。
+- 完全なプロヴェナンス（[§7](#7-メタデータ--プロヴェナンス設計)）を生成する。
+
+### 4.2 実装
+
+- スクリプト: [rosbag_to_lerobot.py](../lekiwi_ros2_teleop/rosbag_to_lerobot.py)
+- 実行方法: `ros2 run lekiwi_ros2_teleop lekiwi_rosbag_to_lerobot ...`
+  - ament_python の entry_point は `install/<pkg>/lib/<pkg>/` に置かれ **PATH には入らない** ため、必ず `ros2 run` 経由か、または `python3 src/.../rosbag_to_lerobot.py` として直接呼ぶ。
+- Signal spec は [lekiwi_metadata.py](../lekiwi_ros2_teleop/lekiwi_metadata.py) から取り込み、`meta/info.json` の `x_lekiwi.signal_spec` と `provenance/conversion.json` の両方に埋め込む。
+
+### 4.3 モード
+
+| モード | 説明 |
+|---|---|
+| `analyze` | dataset を書かず、`--tolerance-sweep-ms` の各値でどれくらい棄却されるかテーブル表示。基準トピックの実測周波数、gap 分位点も出力。**まずこれで許容幅を決める** |
+| `convert` | 実際に LeRobot v3 を生成、`meta/info.json` へ `x_lekiwi` を注入、`provenance/` を書き出す |
+
+### 4.4 同期・ペアリングパラメータ
+
+| パラメータ | 意味 | デフォルト | 推奨 |
+|---|---|---|---|
+| `--sync-base-topic` | 時刻同期の基準トピック | 未指定なら observation 系で最も低周波なものを自動選択 | カメラ側（通常 30Hz） |
+| `--sync-tolerance-ms` | 基準stampから他トピック最近傍までの最大許容ズレ [ms] | `20.0` | `analyze` の p95 付近。30Hz なら 15〜25 ms |
+| `--action-lag-ms` | action 側 stamp に加算するオフセット [ms] | `0.0` | 0 が無難。テレオペの遅延補正には `+15〜+33 ms` |
+| `--tolerance-sweep-ms` | analyze で表示するズレ許容幅の一覧 | `5 10 15 20 25 30 40 50 75 100` | 適宜変更 |
+
+**action lag のデフォルトについて**: 一般的な imitation learning は「観測 obs\_t と、その瞬間の action\_t」を対で学ぶため `0` が自然です。leader arm 読み取り → 送信 → 受信の遅延が片側に偏っている場合のみ `+1/fps` (30Hz なら +33 ms) 程度で試してください。
+
+### 4.5 基本コマンド
+
+```bash
+# 1) まず analyze で許容幅を決める
+ros2 run lekiwi_ros2_teleop lekiwi_rosbag_to_lerobot \
+    --session-dir $HOME/lekiwi_bags/session_20260924_120000 \
+    --mode analyze \
+    --action-lag-ms 0
+
+# 2) convert 実行
+ros2 run lekiwi_ros2_teleop lekiwi_rosbag_to_lerobot \
+    --session-dir $HOME/lekiwi_bags/session_20260924_120000 \
+    --mode convert \
+    --dataset-repo-id john/lekiwi_pick_place \
+    --dataset-root $HOME/lerobot_datasets \
+    --fps 30 \
+    --sync-tolerance-ms 20 \
+    --action-lag-ms 0
+```
+
+既存 dataset への追記は `--resume`。
+
+---
+
+## 5. ステージ 3: キュレーション (Curation) — 予定
+
+**現時点では未実装。以下は今後の設計スケッチ。**
+
+### 5.1 責務（案）
+
+- 悪いエピソードの除外（人手ラベルまたは自動判定）。
+- タスク文字列や success flag の付け直し（relabeling）。
+- train / val / test の split 割当。
+- 軽度のデータ拡張（画像色調変更など。空間変換は同期整合性に注意）。
+
+### 5.2 入出力（案）
+
+- 入力: Stage 2 の `john/lekiwi_pick_place`（immutable として扱う）
+- 出力: 別 repo_id、例 `john/lekiwi_pick_place_v1_curated`
+- キュレーション決定を `curation.json`（残した episode UUID、除外理由、split 割当）として `provenance/` に保存し、`x_lekiwi.curation` へ要約を注入。
+
+### 5.3 実装方針（案）
+
+- `lekiwi_curate` CLI を新設。
+- 段階を分けられるように、フィルタルールを YAML で外部化（例: `filters.yaml`）。
+- 変更は「削るだけ」を基本方針とし、値の書き換えは明示的なラベル系フィールドに限定。
+
+---
+
+## 6. ステージ 4: 検証 (Validation) — 予定
+
+**現時点では未実装。以下は今後の設計スケッチ。**
+
+### 6.1 責務（案）
+
+- **スキーマ検証**: `meta/info.json` の shape/dtype/names と、実データのカラム/形状が一致するか。
+- **セマンティクス検証**: `x_lekiwi.signal_spec` と学習側期待値の突き合わせ、`SIGNAL_SPEC_VERSION` のマイナーバージョン一致確認。
+- **統計的健全性**: 各次元の min/max/mean/std、エピソード長分布、frame drop 率、同期ズレの分布再計算。
+- **時系列整合性**: `t` の単調性、`fps` の実測値との一致。
+- **画像整合性**: 復号可否、色空間の想定一致、フレーム欠損検出。
+- **ラウンドトリップ**: dataset → 数エピソードを replay して action で reproduce できるか（オフライン rerun）。
+
+### 6.2 入出力（案）
+
+- 入力: Stage 3 の dataset
+- 出力: `validation_report.json` + Markdown 要約
+- 失敗時は非ゼロ終了して CI で止められるようにする。
+
+### 6.3 実装方針（案）
+
+- `lekiwi_validate` CLI を新設。
+- 個別チェックをプラグイン化（`checks/schema.py`, `checks/stats.py`, ...）。
+- 検証結果を `provenance/validation/` にも保存し、Hub push 前に必ず走らせる運用にする。
+
+---
+
+## 7. メタデータ / プロヴェナンス設計
+
+### 7.1 情報の分類
+
+- **セマンティクス**（単位・座標系・absolute/relative・gripper 表現・前処理）: `signal_spec`。データ生成時に固定される。
+- **収集時プロヴェナンス**（機材・環境・オペレータ・コード状態）: セッション/エピソード meta。
+- **フォーマッティング時プロヴェナンス**（変換パラメータ・棄却率・コード状態）: `provenance/conversion.json`。
+- **キュレーション/検証プロヴェナンス**（今後）: `provenance/curation.json`, `provenance/validation/`。
+
+### 7.2 命名規則
+
+- LeRobot `meta/info.json` に注入する独自情報は **必ず単一トップレベルキー `x_lekiwi`** に閉じ込める。将来の LeRobot スキーマとの衝突リスクを最小化するため。
+- スキーマの後方互換のために `x_lekiwi.schema_version` と `x_lekiwi.signal_spec_version` を分けて持つ。
+
+### 7.3 git 情報
+
+- **収集側と変換側の両方**でコード commit を記録する。
+- `dirty` フラグと、dirty のときは `git diff HEAD` の全文を保存する（通常サイズは KB オーダ、bisect 用の保険として非常に有効）。
+
+### 7.4 Bag のハッシュ
+
+- 各 bag ディレクトリ内の全 `.mcap` と `metadata.yaml` の SHA256 を計算し、`episode.yaml` に保存する。変換時にはこれを `provenance/conversion.json` にコピーし、原本改変を検出可能にする。
+
+### 7.5 info.json へのサマリ注入
+
+`meta/info.json` の末尾に以下のブロックが追記される（`x_lekiwi` トップレベルキー配下）:
+
+- `schema_version`, `signal_spec_version`
+- `signal_spec`（全文）
+- `source_session`: uuid / name / dir / operator / location / note
+- `record_git_commit`, `record_git_dirty`
+- `conversion_git_commit`, `conversion_git_dirty`
+- `conversion_params`（同期パラメータ）
+- `conversion_totals`（kept / dropped）
+- `episode_summary`（各エピソードの kept/dropped/p95/max gap 等）
+- `provenance_dir`（詳細への案内）
+
+---
+
+## 8. ディレクトリレイアウト
+
+### 8.1 収集時
+
+```
+lekiwi_bags/
+  session_YYYYmmdd_HHMMSS/
+    session.yaml            # session_uuid, signal_spec, hardware, operator, ...
+    software.json           # collector git + libs
+    git_package.diff        # (dirty 時のみ)
+    git_workspace.diff      # (dirty 時のみ)
+    episode_000000/
+      bag/                  # rosbag2 が作る本体（metadata.yaml + *.mcap）
+      episode.yaml          # session_uuid, episode_uuid, start/stop, duration, bag_sha256
+    episode_000001/
+      ...
+```
+
+### 8.2 フォーマッティング後
+
+```
+lerobot_datasets/john/lekiwi_pick_place/
+  meta/
+    info.json               # LeRobot 標準 + x_lekiwi サマリ
+    episodes.jsonl
+    stats.json
+    ...
+  data/                     # LeRobot 標準
+  videos/                   # LeRobot 標準
+  provenance/               # ★ 我々の追加ディレクトリ
+    conversion.json         # 変換時パラメータ・棄却率・argv・git・sync_stats すべて
+    rosbag_to_lerobot.py    # 実際に使ったスクリプトのスナップショット
+    source_session.yaml     # 収集時 session.yaml の複製
+    source_software.json    # 収集時 software.json の複製
+    source_git_package.diff # (dirty 時のみ)
+    source_git_workspace.diff
+```
+
+キュレーション/検証を追加した際には、`provenance/curation.json`、`provenance/validation/` 以下を同じ規約で追加する（**予定**）。
+
+---
+
+## 9. 使い方チートシート
+
+### 9.1 収集
+
+```bash
+sudo apt install ros-jazzy-rosbag2-storage-mcap    # 初回のみ
+colcon build --packages-select lekiwi_ros2_teleop
+source install/setup.bash
+
+# 1) テレオペ起動 (別ターミナル)
+ros2 run lekiwi_ros2_teleop lekiwi_ros2_teleop_client \
+    --ros-args -p leader_arm_port:=/dev/ttyACM0 -p use_keyboard:=false
+
+# 2) bag レコーダ起動
+ros2 launch lekiwi_ros2_teleop lekiwi_bag_record.launch.py \
+    launch_teleop:=false \
+    output_root:=$HOME/lekiwi_bags \
+    single_task:="Pick and place the bottle cap" \
+    operator:="inoma"
+
+# 3) エピソード制御 (別ターミナル)
+ros2 service call /lekiwi_bag_recorder/start_episode std_srvs/srv/Trigger
+ros2 service call /lekiwi_bag_recorder/stop_episode  std_srvs/srv/Trigger
+```
+
+### 9.2 同期分析
+
+```bash
+ros2 run lekiwi_ros2_teleop lekiwi_rosbag_to_lerobot \
+    --session-dir $HOME/lekiwi_bags/session_20260924_120000 \
+    --mode analyze \
+    --action-lag-ms 0
+```
+
+出力例:
+
+```
+--- Drop rate vs. --sync-tolerance-ms ---
+  tol_ms |     kept |  dropped |   drop%
+--------------------------------------------
+    5.0 |     1234 |      560 |  31.20%
+   10.0 |     1650 |      144 |   8.03%
+   20.0 |     1780 |       14 |   0.78%
+--- Per-frame max-gap distribution (ms) ---
+  p50=6.42  p90=14.85  p95=17.20  p99=25.10  max=38.4
+```
+
+### 9.3 変換
+
+```bash
+ros2 run lekiwi_ros2_teleop lekiwi_rosbag_to_lerobot \
+    --session-dir $HOME/lekiwi_bags/session_20260924_120000 \
+    --mode convert \
+    --dataset-repo-id john/lekiwi_pick_place \
+    --dataset-root $HOME/lerobot_datasets \
+    --fps 30 \
+    --sync-tolerance-ms 20 \
+    --action-lag-ms 0
+```
+
+### 9.4 追記変換
+
+```bash
+ros2 run lekiwi_ros2_teleop lekiwi_rosbag_to_lerobot \
+    --session-dir $HOME/lekiwi_bags/session_20260924_130000 \
+    --mode convert \
+    --dataset-repo-id john/lekiwi_pick_place \
+    --resume
+```
+
+### 9.5 キュレーション / 検証 (予定)
+
+```bash
+# 予定
+lekiwi_curate    --dataset-repo-id john/lekiwi_pick_place \
+                 --filters filters.yaml \
+                 --output-repo-id john/lekiwi_pick_place_v1
+lekiwi_validate  --dataset-repo-id john/lekiwi_pick_place_v1
+```
+
+---
+
+## 10. トラブルシューティング
+
+### `ros2 bag record` が起動しない
+
+- `ros-jazzy-rosbag2-storage-mcap` がインストールされていないと `-s mcap` が使えません。
+- 別プロセスで同一 output ディレクトリが使われていないか確認してください。
+
+### エピソードが停止しない / bag が壊れる
+
+- `stop_episode` は subprocess に SIGINT を送っています。フリーズしている場合は Ctrl+C でノードを落としてください。ノードシャットダウン時にも停止処理を試みます。
+- 壊れた bag は `episode.yaml` の `stop_time` が空 or `bag_sha256` が空です。手動で `episode_XXXXXX/` を削除してください（他エピソードには影響しません）。
+
+### `analyze` で drop 率がゼロにならない
+
+- 基準トピック側の欠損が原因のことが多いです。表示される「トピック別 msg数/実測 Hz」を確認し、明らかに周波数が低いカメラがあればそのカメラ設定を疑う。
+- どうしても取り切れない場合は `--sync-tolerance-ms` を p99 付近に緩めるか、`--sync-base-topic` を joint_states 側に切り替えて再評価。
+
+### info.json が LeRobot の CLI で読めない
+
+- 独自情報は `x_lekiwi` トップレベルにしか置いていないので、LeRobot 側のバリデーションを通過するはずです。もし将来のバージョンで JSON Schema バリデーションが厳格化された場合は `strict` オプションを外すか、`x_lekiwi` を `provenance/info_extras.json` に外出しする運用に切り替えてください。
+
+### コード変更後の dataset 再現性
+
+- `provenance/conversion.json` の `conversion_git_commit` と `conversion_git_workspace.commit` を checkout し、`conversion_params.argv` をそのまま実行すれば同一 dataset が再生成できます（raw bag が改変されていないことは `bag_sha256` で検証可能）。
+
+---
+
+## 参考
+
+- LeRobot Documentation: https://huggingface.co/docs/lerobot
+- rosbag2 MCAP storage: https://github.com/ros2/rosbag2/tree/rolling/rosbag2_storage_mcap

@@ -34,10 +34,13 @@ Action / Observation lag
 from __future__ import annotations
 
 import argparse
+import json
 import os
+import shutil
 import sys
 from bisect import bisect_left
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -48,6 +51,24 @@ import yaml
 # --- ROS2 message deserialization ---------------------------------------
 from rclpy.serialization import deserialize_message
 from rosidl_runtime_py.utilities import get_message
+
+# --- shared provenance / signal-spec helpers ----------------------------
+try:
+    from .lekiwi_metadata import (
+        build_signal_spec,
+        package_git_info,
+        software_snapshot,
+        workspace_git_info,
+        SIGNAL_SPEC_VERSION,
+    )
+except ImportError:  # allow running as a script
+    from lekiwi_metadata import (  # type: ignore
+        build_signal_spec,
+        package_git_info,
+        software_snapshot,
+        workspace_git_info,
+        SIGNAL_SPEC_VERSION,
+    )
 import rosbag2_py
 
 # --- lazy LeRobot import (convert mode only) -----------------------------
@@ -281,8 +302,18 @@ def print_analysis(session_dir: Path,
         if base not in msgs:
             print(f"  [skip] {ep_dir.name}: base topic {base} missing")
             continue
+
+        # Detect entirely-missing topics so we don't conflate
+        # "topic never recorded" with "topic out of sync tolerance".
+        present_obs = [t for t in obs_topics
+                       if msgs.get(t) and len(msgs[t].stamps_ns) >= 1]
+        present_act = [t for t in action_topics
+                       if msgs.get(t) and len(msgs[t].stamps_ns) >= 1]
+        missing_topics = [t for t in obs_topics + action_topics
+                          if t not in present_obs + present_act]
+
         stats = compute_match_stats(
-            msgs, base, obs_topics, action_topics, action_lag_ms)
+            msgs, base, present_obs, present_act, action_lag_ms)
         max_gap = stats.max_gap_per_frame_ms
         aggregate_gaps.append(max_gap)
         per_episode_rows.append(
@@ -290,27 +321,49 @@ def print_analysis(session_dir: Path,
         print(f"  {ep_dir.name}: base={base} frames={stats.base_count}")
         for fi in freq_info:
             print(f"      {fi}")
+        if missing_topics:
+            print(f"      [WARN] entirely-missing topics excluded from "
+                  f"gap stats: {missing_topics}")
+            print(f"             -> at convert time every frame would be "
+                  f"DROPPED regardless of --sync-tolerance-ms.")
 
     if not per_episode_rows:
         print("No episodes with usable bags.")
         return
 
     all_gaps = np.concatenate(aggregate_gaps)
+    finite_gaps = all_gaps[np.isfinite(all_gaps)]
+    n_inf = int(all_gaps.size - finite_gaps.size)
+
     print("\n--- Drop rate vs. --sync-tolerance-ms ---")
+    print("  (based on topics actually present; frames with a fully-missing "
+          "topic are always dropped and shown separately)")
     header = f"{'tol_ms':>8} | {'kept':>8} | {'dropped':>8} | {'drop%':>7}"
     print(header)
     print("-" * len(header))
     for tol in tolerances_ms:
-        kept = int(np.sum(all_gaps <= tol))
-        dropped = int(np.sum(all_gaps > tol))
-        total = kept + dropped
-        pct = (dropped / total * 100.0) if total else 0.0
-        print(f"{tol:>8.1f} | {kept:>8d} | {dropped:>8d} | {pct:>6.2f}%")
+        kept = int(np.sum(finite_gaps <= tol))
+        dropped_sync = int(np.sum(finite_gaps > tol))
+        dropped_total = dropped_sync + n_inf
+        total = kept + dropped_total
+        pct = (dropped_total / total * 100.0) if total else 0.0
+        print(f"{tol:>8.1f} | {kept:>8d} | {dropped_total:>8d} | "
+              f"{pct:>6.2f}%")
+    if n_inf > 0:
+        print(f"  note: {n_inf} frame(s) are unconditionally dropped due to "
+              f"a fully-missing paired topic.")
 
-    q = np.quantile(all_gaps, [0.5, 0.9, 0.95, 0.99, 1.0])
     print("\n--- Per-frame max-gap distribution (ms) ---")
-    print(f"  p50={q[0]:.2f}  p90={q[1]:.2f}  p95={q[2]:.2f}  "
-          f"p99={q[3]:.2f}  max={q[4]:.2f}")
+    if finite_gaps.size == 0:
+        print("  (no finite gaps — every frame has at least one missing "
+              "paired topic; fix data collection before choosing a "
+              "tolerance)")
+    else:
+        q = np.quantile(finite_gaps, [0.5, 0.9, 0.95, 0.99, 1.0])
+        print(f"  p50={q[0]:.2f}  p90={q[1]:.2f}  p95={q[2]:.2f}  "
+              f"p99={q[3]:.2f}  max={q[4]:.2f}  "
+              f"(over {finite_gaps.size} frames with all paired topics "
+              f"present)")
 
 
 # ============================================================
@@ -447,19 +500,21 @@ def convert_session(session_dir: Path,
 
     total_kept = 0
     total_dropped = 0
+    episode_records: List[Dict[str, object]] = []
 
     for ep_dir in episode_dirs:
         bag_dir = ep_dir / "bag"
         if not bag_dir.exists():
             print(f"[skip] {ep_dir.name}: no bag/")
             continue
-        # per-episode task override
+        # per-episode task override + source provenance
         ep_task = single_task
+        ep_meta_dict: Dict[str, object] = {}
         ep_meta_path = ep_dir / "episode.yaml"
         if ep_meta_path.exists():
             try:
-                ep_meta = yaml.safe_load(ep_meta_path.read_text()) or {}
-                ep_task = ep_meta.get("single_task", single_task)
+                ep_meta_dict = yaml.safe_load(ep_meta_path.read_text()) or {}
+                ep_task = ep_meta_dict.get("single_task", single_task)
             except Exception:  # noqa: BLE001
                 pass
 
@@ -540,8 +595,204 @@ def convert_session(session_dir: Path,
         print(f"  {ep_dir.name}: kept={ep_kept} dropped={ep_dropped} "
               f"(base={base})")
 
+        # Per-episode provenance record
+        q = np.quantile(max_gap, [0.5, 0.9, 0.95, 0.99, 1.0]) \
+            if len(max_gap) else np.zeros(5)
+        episode_records.append({
+            "episode_dir": ep_dir.name,
+            "source_session_uuid": ep_meta_dict.get("session_uuid"),
+            "source_episode_uuid": ep_meta_dict.get("episode_uuid"),
+            "source_episode_index": ep_meta_dict.get("episode_index"),
+            "bag_sha256": ep_meta_dict.get("bag_sha256", {}),
+            "start_time": ep_meta_dict.get("start_time"),
+            "stop_time": ep_meta_dict.get("stop_time"),
+            "duration_sec": ep_meta_dict.get("duration_sec"),
+            "single_task": ep_task,
+            "sync_base_topic_used": base,
+            "frames_kept": ep_kept,
+            "frames_dropped": ep_dropped,
+            "max_gap_ms_p50": float(q[0]),
+            "max_gap_ms_p90": float(q[1]),
+            "max_gap_ms_p95": float(q[2]),
+            "max_gap_ms_p99": float(q[3]),
+            "max_gap_ms_max": float(q[4]),
+        })
+
     print(f"\nDone. total kept={total_kept} dropped={total_dropped} "
           f"-> {dataset_path}")
+
+    # -------- Provenance emission --------
+    _write_conversion_provenance(
+        dataset_path=dataset_path,
+        session_dir=session_dir,
+        episode_records=episode_records,
+        params={
+            "sync_base_topic": sync_base_topic,
+            "sync_tolerance_ms": sync_tolerance_ms,
+            "action_lag_ms": action_lag_ms,
+            "fps": fps,
+            "use_videos": use_videos,
+            "front_shape": list(front_shape),
+            "wrist_shape": list(wrist_shape),
+            "robot_type": robot_type,
+            "single_task_default": single_task,
+            "resume": resume,
+        },
+        totals={"kept": total_kept, "dropped": total_dropped},
+    )
+    _inject_x_lekiwi_into_info_json(
+        dataset_path=dataset_path,
+        session_dir=session_dir,
+        episode_records=episode_records,
+        params={
+            "sync_base_topic": sync_base_topic,
+            "sync_tolerance_ms": sync_tolerance_ms,
+            "action_lag_ms": action_lag_ms,
+        },
+        totals={"kept": total_kept, "dropped": total_dropped},
+    )
+
+
+# ============================================================
+# Provenance writers
+# ============================================================
+
+
+def _load_session_meta(session_dir: Path) -> Dict[str, object]:
+    session_yaml = session_dir / "session.yaml"
+    if session_yaml.exists():
+        try:
+            return yaml.safe_load(session_yaml.read_text()) or {}
+        except Exception:  # noqa: BLE001
+            return {}
+    return {}
+
+
+def _load_session_software(session_dir: Path) -> Dict[str, object]:
+    p = session_dir / "software.json"
+    if p.exists():
+        try:
+            return json.loads(p.read_text())
+        except Exception:  # noqa: BLE001
+            return {}
+    return {}
+
+
+def _write_conversion_provenance(dataset_path: Path,
+                                 session_dir: Path,
+                                 episode_records: List[Dict[str, object]],
+                                 params: Dict[str, object],
+                                 totals: Dict[str, int]) -> None:
+    prov = dataset_path / "provenance"
+    prov.mkdir(parents=True, exist_ok=True)
+
+    session_meta = _load_session_meta(session_dir)
+    session_software = _load_session_software(session_dir)
+
+    conversion = {
+        "generated_at": datetime.now(timezone.utc).isoformat(
+            timespec="seconds"),
+        "params": params,
+        "totals": totals,
+        "signal_spec_version": SIGNAL_SPEC_VERSION,
+        "signal_spec": build_signal_spec(),
+        "conversion_software": software_snapshot(),
+        "conversion_git_package": package_git_info(),
+        "conversion_git_workspace": workspace_git_info(),
+        "source": {
+            "session_dir": str(session_dir),
+            "session_uuid": session_meta.get("session_uuid"),
+            "session_name": session_meta.get("session_name"),
+            "session_created_at": session_meta.get("created_at"),
+            "operator": session_meta.get("operator"),
+            "location": session_meta.get("location"),
+            "note": session_meta.get("note"),
+            "hardware": session_meta.get("hardware"),
+            "record_software": session_software.get("software"),
+            "record_git_package": session_software.get("git_package"),
+            "record_git_workspace": session_software.get("git_workspace"),
+        },
+        "episodes": episode_records,
+    }
+    (prov / "conversion.json").write_text(
+        json.dumps(conversion, indent=2, ensure_ascii=False, default=str))
+
+    # Snapshot the actual conversion script for reproducibility.
+    try:
+        shutil.copy2(Path(__file__), prov / "rosbag_to_lerobot.py")
+    except Exception:  # noqa: BLE001
+        pass
+    # Copy the session-level provenance files verbatim.
+    for name in ("session.yaml", "software.json",
+                 "git_package.diff", "git_workspace.diff"):
+        src = session_dir / name
+        if src.exists():
+            try:
+                shutil.copy2(src, prov / f"source_{name}")
+            except Exception:  # noqa: BLE001
+                pass
+
+
+def _inject_x_lekiwi_into_info_json(dataset_path: Path,
+                                    session_dir: Path,
+                                    episode_records: List[Dict[str, object]],
+                                    params: Dict[str, object],
+                                    totals: Dict[str, int]) -> None:
+    """Add a namespaced summary block to meta/info.json.
+
+    All custom fields live under the single top-level key ``x_lekiwi`` to
+    minimize the chance of colliding with future LeRobot schema keys.
+    """
+    info_path = dataset_path / "meta" / "info.json"
+    if not info_path.exists():
+        return
+    try:
+        info = json.loads(info_path.read_text())
+    except Exception as e:  # noqa: BLE001
+        print(f"[warn] Could not parse info.json for x_lekiwi injection: {e}")
+        return
+
+    session_meta = _load_session_meta(session_dir)
+    session_software = _load_session_software(session_dir)
+    pkg_git = session_software.get("git_package") or {}
+    convert_git = package_git_info()
+
+    x = {
+        "schema_version": "1.0.0",
+        "signal_spec_version": SIGNAL_SPEC_VERSION,
+        "signal_spec": build_signal_spec(),
+        "source_session": {
+            "session_uuid": session_meta.get("session_uuid"),
+            "session_name": session_meta.get("session_name"),
+            "session_dir": str(session_dir),
+            "operator": session_meta.get("operator"),
+            "location": session_meta.get("location"),
+            "note": session_meta.get("note"),
+        },
+        "record_git_commit": pkg_git.get("commit"),
+        "record_git_dirty": pkg_git.get("dirty"),
+        "conversion_git_commit": convert_git.get("commit"),
+        "conversion_git_dirty": convert_git.get("dirty"),
+        "conversion_params": params,
+        "conversion_totals": totals,
+        "episode_summary": [
+            {k: r.get(k) for k in (
+                "source_episode_uuid", "source_episode_index",
+                "sync_base_topic_used",
+                "frames_kept", "frames_dropped",
+                "max_gap_ms_p95", "max_gap_ms_max")}
+            for r in episode_records
+        ],
+        "provenance_dir": "provenance/",
+        "provenance_note": (
+            "Full raw hashes, git diffs, and per-frame stats live in "
+            "provenance/conversion.json. This info.json block is a summary."
+        ),
+    }
+
+    info["x_lekiwi"] = x
+    info_path.write_text(
+        json.dumps(info, indent=2, ensure_ascii=False, default=str))
 
 
 # ============================================================
