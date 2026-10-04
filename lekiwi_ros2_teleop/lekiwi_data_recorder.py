@@ -86,7 +86,7 @@ lerobot_dataset_module.get_safe_version = _get_safe_version_offline
 
 # Import other LeRobot components
 from lerobot.datasets.pipeline_features import create_initial_features
-from lerobot.datasets.utils import build_dataset_frame
+from lerobot.utils.feature_utils import build_dataset_frame
 from lerobot.datasets.image_writer import safe_stop_image_writer
 from lerobot.datasets.video_utils import VideoEncodingManager
 from lerobot.utils.constants import ACTION, OBS_STR

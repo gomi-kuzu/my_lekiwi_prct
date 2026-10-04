@@ -86,10 +86,10 @@ from lerobot.policies.factory import make_policy, make_pre_post_processors
 from lerobot.policies.utils import make_robot_action
 from lerobot.processor import PolicyProcessorPipeline, RobotAction, RobotObservation
 from lerobot.processor.rename_processor import rename_stats
-from lerobot.datasets.utils import build_dataset_frame
+from lerobot.utils.feature_utils import build_dataset_frame
 from lerobot.utils.constants import ACTION, OBS_STR
-from lerobot.utils.utils import get_safe_torch_device
-from lerobot.utils.control_utils import predict_action
+from lerobot.utils.device_utils import get_safe_torch_device
+from lerobot.common.control_utils import predict_action
 
 
 class LeKiwiPolicyNode(Node):
