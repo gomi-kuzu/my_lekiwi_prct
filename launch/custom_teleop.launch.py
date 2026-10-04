@@ -67,7 +67,7 @@ def generate_launch_description():
             parameters=[{
                 'device_id': joy_dev,
                 'deadzone': 0.3,
-                'autorepeat_rate': 30.0,
+                'autorepeat_rate': 20.0,
             }],
             output='screen'
         ),
