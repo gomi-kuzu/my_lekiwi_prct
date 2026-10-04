@@ -318,12 +318,156 @@ def pick_base_topic(topic_msgs: Dict[str, TopicMessages],
 DEFAULT_TOLERANCE_SWEEP_MS = [5, 10, 15, 20, 25, 30, 40, 50, 75, 100]
 
 
+def _short_topic(t: str, width: int = 22) -> str:
+    # Drop the common /lekiwi/ prefix and the verbose image suffix so that
+    # e.g. camera/front and camera/wrist stay distinguishable in legends.
+    s = t
+    if s.startswith("/lekiwi/"):
+        s = s[len("/lekiwi/"):]
+    s = s.replace("/image_raw/compressed", "").replace("/compressed", "")
+    s = s.lstrip("/")
+    if len(s) <= width:
+        return s
+    return "..." + s[-(width - 3):]
+
+
+def plot_episode_timing(ep_name: str,
+                        raw_stamps_ns: Dict[str, np.ndarray],
+                        base_topic: str,
+                        window_ns: Optional[Tuple[int, int]],
+                        base_stamps_trimmed_ns: np.ndarray,
+                        gaps_ms: Dict[str, np.ndarray],
+                        sync_tolerance_ms: float,
+                        out_path: Path,
+                        start_s: float = 0.0,
+                        end_s: Optional[float] = 5.0) -> Optional[Path]:
+    """Render a 3-panel timing figure for one episode and save it.
+
+    Panels:
+      1. Inter-message period Δt[ms] per topic (raw, pre-sync).
+      2. Raw message-time raster per topic with the overlap window shaded
+         (shows cross-topic phase / the episode-edge holes).
+      3. Nearest-neighbor pairing gap[ms] per topic at each (trimmed) base
+         frame, i.e. the state *after* synchronization, with the tolerance
+         line drawn for reference.
+
+    Returns the written path, or ``None`` if matplotlib is unavailable.
+    """
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except Exception as e:  # noqa: BLE001
+        print(f"  [plot] skipped ({e}); install matplotlib to enable plots")
+        return None
+
+    if not raw_stamps_ns:
+        return None
+    t0 = min(int(arr[0]) for arr in raw_stamps_ns.values() if arr.size)
+    topics = list(raw_stamps_ns.keys())
+
+    # Time window (relative seconds from the first message). Clamp to the data.
+    t_last = max((int(arr[-1]) for arr in raw_stamps_ns.values()
+                  if arr.size), default=t0)
+    data_end_s = (t_last - t0) / 1e9
+    win_lo = max(0.0, start_s)
+    win_hi = end_s if end_s is not None else data_end_s
+    if win_hi <= win_lo:
+        win_hi = data_end_s
+
+    def _mask(x: np.ndarray) -> np.ndarray:
+        return (x >= win_lo) & (x <= win_hi)
+
+    fig, axes = plt.subplots(3, 1, figsize=(12, 10))
+    fig.suptitle(f"Timing analysis — {ep_name} (base={base_topic})  "
+                 f"window [{win_lo:.2f}, {win_hi:.2f}] s")
+
+    # Panel 1: inter-message period Δt
+    ax = axes[0]
+    for t in topics:
+        s = raw_stamps_ns[t]
+        if s.size < 2:
+            continue
+        x = (s[1:] - t0) / 1e9
+        dt_ms = np.diff(s) / 1e6
+        m = _mask(x)
+        if not np.any(m):
+            continue
+        ax.plot(x[m], dt_ms[m], marker=".", ms=3, lw=0.8,
+                label=_short_topic(t))
+    ax.set_xlim(win_lo, win_hi)
+    ax.set_title("1) Inter-message period Δt (raw, pre-sync)")
+    ax.set_xlabel("time [s]")
+    ax.set_ylabel("Δt [ms]")
+    ax.grid(True, alpha=0.3)
+    ax.legend(fontsize=8, loc="upper right", ncol=2)
+
+    # Panel 2: raw message-time raster
+    ax = axes[1]
+    for i, t in enumerate(topics):
+        s = raw_stamps_ns[t]
+        if s.size == 0:
+            continue
+        x = (s - t0) / 1e9
+        m = _mask(x)
+        if not np.any(m):
+            continue
+        xm = x[m]
+        ax.plot(xm, np.full_like(xm, i, dtype=float), "|", ms=8,
+                color=f"C{i % 10}")
+    if window_ns is not None:
+        ws = (window_ns[0] - t0) / 1e9
+        we = (window_ns[1] - t0) / 1e9
+        ax.axvspan(ws, we, color="green", alpha=0.08,
+                   label="all-topic overlap window")
+        ax.axvline(ws, color="green", ls="--", lw=0.8)
+        ax.axvline(we, color="green", ls="--", lw=0.8)
+        ax.legend(fontsize=8, loc="upper right")
+    ax.set_xlim(win_lo, win_hi)
+    ax.set_yticks(range(len(topics)))
+    ax.set_yticklabels([_short_topic(t) for t in topics], fontsize=8)
+    ax.set_title("2) Raw message times (pre-sync); shaded = overlap window")
+    ax.set_xlabel("time [s]")
+    ax.grid(True, axis="x", alpha=0.3)
+
+    # Panel 3: pairing gap after synchronization
+    ax = axes[2]
+    if base_stamps_trimmed_ns.size:
+        xb = (base_stamps_trimmed_ns - t0) / 1e9
+        for t, g in gaps_ms.items():
+            finite = np.isfinite(g) & _mask(xb)
+            if not np.any(finite):
+                continue
+            ax.plot(xb[finite], g[finite], marker=".", ms=3, lw=0.8,
+                    label=_short_topic(t))
+    ax.axhline(sync_tolerance_ms, color="red", ls="--", lw=1.0,
+               label=f"tolerance {sync_tolerance_ms:.0f} ms")
+    ax.set_xlim(win_lo, win_hi)
+    ax.set_title("3) Nearest-neighbor gap at each base frame (post-sync)")
+    ax.set_xlabel("time [s]")
+    ax.set_ylabel("gap [ms]")
+    ax.grid(True, alpha=0.3)
+    ax.legend(fontsize=8, loc="upper right", ncol=2)
+
+    fig.tight_layout(rect=(0, 0, 1, 0.97))
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path, dpi=120)
+    plt.close(fig)
+    return out_path
+
+
 def print_analysis(session_dir: Path,
                    episode_dirs: List[Path],
                    sync_base_topic: Optional[str],
                    action_lag_ms: float,
                    tolerances_ms: List[float],
-                   trim_to_overlap: bool = True) -> None:
+                   trim_to_overlap: bool = True,
+                   plot: bool = False,
+                   plot_dir: Optional[Path] = None,
+                   plot_episode: Optional[str] = None,
+                   plot_tolerance_ms: float = 20.0,
+                   plot_start_s: float = 0.0,
+                   plot_end_s: Optional[float] = 5.0) -> None:
     obs_topics = [DEFAULT_JOINT_STATE, DEFAULT_FRONT_CAM, DEFAULT_WRIST_CAM]
     action_topics = [DEFAULT_CMD_VEL, DEFAULT_ARM_CMD]
     all_topics = list(dict.fromkeys(obs_topics + action_topics))
@@ -331,6 +475,9 @@ def print_analysis(session_dir: Path,
     print(f"\n=== Sync analysis for session {session_dir} ===")
     print(f"  action_lag_ms = {action_lag_ms}")
     print(f"  trim_to_overlap = {trim_to_overlap}")
+    if plot:
+        print(f"  plot = True (episode={plot_episode or 'first usable'})")
+    plot_done = False
 
     aggregate_gaps: List[np.ndarray] = []
     per_episode_rows: List[Tuple[str, str, int, np.ndarray]] = []
@@ -376,6 +523,19 @@ def print_analysis(session_dir: Path,
         missing_topics = [t for t in obs_topics + action_topics
                           if t not in present_obs + present_act]
 
+        # Decide whether to plot this episode (first usable, or the named one).
+        want_plot = plot and not plot_done and (
+            plot_episode is None or ep_dir.name == plot_episode)
+        # Snapshot raw stamps + overlap window *before* trimming mutates them.
+        raw_stamps_ns: Dict[str, np.ndarray] = {}
+        plot_window: Optional[Tuple[int, int]] = None
+        if want_plot:
+            raw_stamps_ns = {
+                t: np.array(msgs[t].stamps_ns, dtype=np.int64)
+                for t in present_obs + present_act if msgs.get(t)}
+            plot_window = compute_overlap_window(
+                msgs, present_obs + present_act)
+
         # Auto-trim the base topic to the window where *all present* topics
         # are streaming, removing episode-edge frames where an action topic
         # has not started yet / has already stopped.
@@ -391,6 +551,26 @@ def print_analysis(session_dir: Path,
         aggregate_gaps.append(max_gap)
         per_episode_rows.append(
             (ep_dir.name, base, stats.base_count, max_gap))
+
+        if want_plot:
+            out_dir = plot_dir or (session_dir / "analysis_plots")
+            out_path = out_dir / f"timing_{ep_dir.name}.png"
+            written = plot_episode_timing(
+                ep_name=ep_dir.name,
+                raw_stamps_ns=raw_stamps_ns,
+                base_topic=base,
+                window_ns=plot_window,
+                base_stamps_trimmed_ns=np.array(
+                    msgs[base].stamps_ns, dtype=np.int64),
+                gaps_ms=stats.gaps_ms,
+                sync_tolerance_ms=plot_tolerance_ms,
+                out_path=out_path,
+                start_s=plot_start_s,
+                end_s=plot_end_s,
+            )
+            if written is not None:
+                plot_done = True
+                print(f"  [plot] wrote {written}")
 
         # Accumulate per-topic gaps and per-frame worst contributor.
         if stats.gaps_ms:
@@ -993,6 +1173,21 @@ def main() -> None:
     p.add_argument("--no-trim-to-overlap", dest="trim_to_overlap",
                    action="store_false",
                    help="Disable the all-topic overlap trim.")
+    p.add_argument("--plot", action="store_true", default=False,
+                   help="Analyze mode: render a timing figure (message "
+                        "period + raw raster + post-sync gap) for one episode.")
+    p.add_argument("--plot-dir", type=Path, default=None,
+                   help="Where to save plots. Default: "
+                        "<session-dir>/analysis_plots/.")
+    p.add_argument("--plot-episode", default=None,
+                   help="Episode dir name to plot (e.g. episode_000000). "
+                        "Default: first usable episode.")
+    p.add_argument("--plot-start-s", type=float, default=0.0,
+                   help="Plot window start [s] from episode start. "
+                        "Default 0.")
+    p.add_argument("--plot-end-s", type=float, default=5.0,
+                   help="Plot window end [s] from episode start. "
+                        "Default 5. Use a negative value to plot to the end.")
     # convert-only options
     p.add_argument("--dataset-repo-id",
                    help="username/dataset_name (convert mode)")
@@ -1033,6 +1228,13 @@ def main() -> None:
             action_lag_ms=args.action_lag_ms,
             tolerances_ms=args.tolerance_sweep_ms,
             trim_to_overlap=args.trim_to_overlap,
+            plot=args.plot,
+            plot_dir=(args.plot_dir.expanduser().resolve()
+                      if args.plot_dir else None),
+            plot_episode=args.plot_episode,
+            plot_tolerance_ms=args.sync_tolerance_ms,
+            plot_start_s=args.plot_start_s,
+            plot_end_s=(None if args.plot_end_s < 0 else args.plot_end_s),
         )
         return
 

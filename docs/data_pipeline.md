@@ -164,6 +164,8 @@ ros2 service call /lekiwi_bag_recorder/stop_episode  std_srvs/srv/Trigger
 2. **カメラ取得の非同期化**: LeRobot の `OpenCVCamera` は既に背景スレッド読み出し（`read_latest()` は非ブロッキング）。それでも 15Hz に落ちる原因を切り分ける（USB 帯域競合 vs 単体デバイス上限）。`lsusb -t` で 2 台が同一 USB コントローラ配下でないか確認し、別バスへ分散する。
 3. **解像度・fourcc の最適化**: 既に `fourcc="MJPG"` 設定済み。さらに解像度を下げる / 2 台のカメラ負荷を分散するなどで 30fps 到達可能か検証する。
 4. 上記で 30Hz 化できた場合は、`convert` の `--fps` を 30 に戻す。
+5. **`cmd_vel` を `TwistStamped` 化して header.stamp を持たせる（TODO）**。現状 `/lekiwi/cmd_vel` は `geometry_msgs/Twist` で **header を持たず**、Stage 2 では bag 受信時刻フォールバックで対にしている（計測で確認済み: 他 4 トピック `joint_states` / `arm_joint_commands` / 両カメラは header.stamp 完備、`cmd_vel` のみ header 無し）。単一マシンでは実害は小さいが、複数マシンにまたがると cmd_vel だけ時間軸が受信時刻系になり他トピック（header.stamp 系）とクロック整合が取れない。teleop 側で `TwistStamped` に切り替え、変換側の `_stamp_ns` も header 対応させる。
+
 
 > 補足: Raspberry Pi などホスト側のハード制約に依存するため、ハードウェア構成（USB ハブの有無、カメラ機種）を変えた場合は再計測してこの節を更新する。
 
@@ -242,7 +244,44 @@ $$[\,\max(\text{各トピックの先頭 stamp}),\ \min(\text{各トピックの
 - カメラのように p50〜max すべて小さければ同期品質は良好。
 - `worst%` が高いトピックが drop の主因なので、まずそこを見る（レート不足なのか、header.stamp が無く受信時刻フォールバックなのか等）。
 
-### 4.6 基本コマンド
+### 4.6 タイミング可視化（`--plot`）
+
+数値だけでは掴みにくい「トピック間の位相」「周期の揺らぎ」「同期前後の差」を 1 枚の PNG で見るためのモード。`analyze` に `--plot` を付けると、1 エピソード分の 3 段プロットを `<session-dir>/analysis_plots/timing_<episode>.png` に書き出す。
+
+```bash
+# デフォルト（最初の使用可能エピソード、0〜5s 窓）
+ros2 run lekiwi_ros2_teleop lekiwi_rosbag_to_lerobot \
+    --session-dir $HOME/lekiwi_bags/session_20260924_120000 \
+    --mode analyze --plot
+
+# エピソード・時間窓・保存先を指定
+ros2 run lekiwi_ros2_teleop lekiwi_rosbag_to_lerobot \
+    --session-dir $HOME/lekiwi_bags/session_20260924_120000 \
+    --mode analyze --plot \
+    --plot-episode episode_000003 \
+    --plot-start-s 10 --plot-end-s 15 \
+    --plot-dir /tmp/lekiwi_plots
+```
+
+| オプション | 意味 | デフォルト |
+|---|---|---|
+| `--plot` | タイミング図を出力する | off |
+| `--plot-episode` | 対象エピソードのディレクトリ名（例 `episode_000000`） | 最初の使用可能エピソード |
+| `--plot-start-s` | 図の時間窓の開始 [s]（エピソード先頭基準） | `0` |
+| `--plot-end-s` | 図の時間窓の終了 [s]。負値で末尾まで | `5` |
+| `--plot-dir` | 保存先ディレクトリ | `<session-dir>/analysis_plots/` |
+
+> 収録が長いと生メッセージが密集して潰れるため、**既定では先頭 5 秒だけ**を描画する。全体や別区間を見たいときだけ `--plot-start-s` / `--plot-end-s` を指定する（`--plot-end-s -1` で全区間）。tolerance 線（赤破線）は `--sync-tolerance-ms` の値を使う。matplotlib が無い環境ではスキップして警告を出すだけで、`analyze` 本体は従来通り動く。
+
+**図の見方（3 パネル、横軸はすべて同じ時間窓 [s]）:**
+
+1. **Inter-message period Δt（同期前・生）**: 各トピックの隣接メッセージ間隔 [ms]。水平で安定していれば周期が綺麗（例: カメラ/joint_states は 66ms=15Hz でほぼ一定）。ギザギザ・飛びがあればそのトピックの publish が不安定（例: `cmd_vel` は joy のイベント駆動なので操作中だけ密になる）。
+2. **Raw message times（同期前のラスター）**: トピックごとに生メッセージ発生時刻を縦線で表示。**緑の網掛けが「全トピックが同時に流れている overlap 窓」**（[§4.5](#45-overlap-トリムとトピック別-gap-内訳) のトリム範囲）。網掛けの左端より前で action 系の縦線が無ければ、そこが「立ち上がりの穴」。トピック間の位相ズレもここで直感的に分かる。
+3. **Nearest-neighbor gap（同期後）**: トリム後の各基準フレームで選ばれた相手との gap [ms]。**赤破線の tolerance 線を全点が下回っていれば、その許容幅で棄却ゼロ**。特定トピックだけ線に張り付く/超えるなら、それが drop 主因（[§4.5](#45-overlap-トリムとトピック別-gap-内訳) の `worst%` と対応）。
+
+要するに **パネル 1・2 が「同期前の生の素性」**、**パネル 3 が「同期後の結果」** で、同じ時間軸で上下に並ぶため前後比較ができる。
+
+### 4.7 基本コマンド
 
 
 ```bash
@@ -445,6 +484,15 @@ ros2 run lekiwi_ros2_teleop lekiwi_rosbag_to_lerobot \
    20.0 |     1780 |       14 |   0.78%
 --- Per-frame max-gap distribution (ms) ---
   p50=6.42  p90=14.85  p95=17.20  p99=25.10  max=38.4
+```
+
+タイミングを図で確認したいときは `--plot` を付ける（詳細と図の見方は [§4.6](#46-タイミング可視化--plot)）:
+
+```bash
+ros2 run lekiwi_ros2_teleop lekiwi_rosbag_to_lerobot \
+    --session-dir $HOME/lekiwi_bags/session_20260924_120000 \
+    --mode analyze --plot          # 既定: 最初のエピソードの 0〜5s
+# -> <session-dir>/analysis_plots/timing_episode_XXXXXX.png
 ```
 
 ### 9.3 変換
