@@ -201,10 +201,49 @@ ros2 service call /lekiwi_bag_recorder/stop_episode  std_srvs/srv/Trigger
 | `--sync-tolerance-ms` | 基準stampから他トピック最近傍までの最大許容ズレ [ms] | `20.0` | `analyze` の p95 付近。30Hz なら 15〜25 ms |
 | `--action-lag-ms` | action 側 stamp に加算するオフセット [ms] | `0.0` | 0 が無難。テレオペの遅延補正には `+15〜+33 ms` |
 | `--tolerance-sweep-ms` | analyze で表示するズレ許容幅の一覧 | `5 10 15 20 25 30 40 50 75 100` | 適宜変更 |
+| `--trim-to-overlap` / `--no-trim-to-overlap` | 全トピックが揃って流れている区間だけに基準フレームを絞るか | `--trim-to-overlap`（ON） | 基本 ON のまま |
 
 **action lag のデフォルトについて**: 一般的な imitation learning は「観測 obs\_t と、その瞬間の action\_t」を対で学ぶため `0` が自然です。leader arm 読み取り → 送信 → 受信の遅延が片側に偏っている場合のみ `+1/fps` (30Hz なら +33 ms) 程度で試してください。
 
-### 4.5 基本コマンド
+### 4.5 overlap トリムとトピック別 gap 内訳
+
+`analyze` / `convert` の内部では、基準トピックの各 stamp に対し他トピックの **最近傍メッセージ** を取り、「基準 stamp からの最大絶対ズレ（= そのフレームの `max_gap`）」が `--sync-tolerance-ms` を超えたフレームを棄却している。ここで 2 つの仕組みが効いている。
+
+#### overlap トリム（`--trim-to-overlap`、デフォルト ON）
+
+エピソードの録画は「bag 開始 → 操作開始」「操作終了 → bag 停止」の間に必ず余白ができる。この余白では joint_states・カメラは流れているのに **action 系（leader arm の `arm_joint_commands` / joy の `cmd_vel`）がまだ publish されていない / 既に止まっている**。そのままだと端の基準フレームに対する action の最近傍が数百 ms〜数秒先になり、どれだけ `--sync-tolerance-ms` を緩めても棄却され続ける（＝ drop 率が下がりきらない底）。
+
+そこで変換・分析の前に、**全トピックが同時に流れている区間**
+
+$$[\,\max(\text{各トピックの先頭 stamp}),\ \min(\text{各トピックの末尾 stamp})\,]$$
+
+を計算し、基準トピックのフレームだけをこの区間に絞り込む（ペア相手のメッセージは端の最近傍探索のため全保持する）。これで端の「穴」に落ちるフレームが構造的に消え、残りは本質的な同期品質だけで評価できる。`analyze` 出力では
+
+```
+[trim] dropped 32 head + 1 tail base frames outside the all-topic overlap window
+```
+
+のように、先頭・末尾から何フレーム落としたかが表示される。無効化したい場合のみ `--no-trim-to-overlap`。
+
+#### トピック別 gap 内訳（Per-paired-topic gap breakdown）
+
+`max_gap` は「4 つのペア相手のうち最悪の 1 つ」なので、drop が出たときに **どのトピックが原因か** が分かると対処が早い。`analyze` は各ペア相手について gap の p50 / p95 / max と、「そのフレームで最大ズレだったのが自分だった割合（`worst%`）」を表示する。
+
+```
+--- Per-paired-topic gap breakdown (ms) ---
+  topic                        |   p50 |   p95 |   max | worst%
+  /lekiwi/cmd_vel              | 12.26 | 16.67 | 19.48 |  44.5%
+  /lekiwi/arm_joint_commands   | 12.61 | 15.58 | 16.75 |  55.5%
+  /lekiwi/camera/wrist/...     |  3.90 |  4.12 |  4.14 |   0.0%
+  /lekiwi/camera/front/...     |  0.26 |  0.27 |  0.28 |   0.0%
+```
+
+- p50 は健全なのに p95 / max だけ極端に大きいトピックがあれば、そのトピックに **一時的な「穴」**（上記の端の余白や publish 詰まり）がある。
+- カメラのように p50〜max すべて小さければ同期品質は良好。
+- `worst%` が高いトピックが drop の主因なので、まずそこを見る（レート不足なのか、header.stamp が無く受信時刻フォールバックなのか等）。
+
+### 4.6 基本コマンド
+
 
 ```bash
 # 1) まず analyze で許容幅を決める
