@@ -92,6 +92,15 @@ DEFAULT_ARM_CMD = "/lekiwi/arm_joint_commands"
 DEFAULT_FRONT_CAM = "/lekiwi/camera/front/image_raw/compressed"
 DEFAULT_WRIST_CAM = "/lekiwi/camera/wrist/image_raw/compressed"
 
+# Selectable cameras: short name -> (bag topic, LeRobot feature key).
+# `--cameras` / `--no-cameras` pick which of these are included at convert
+# time; omitted cameras are not read, not synced, and not written as features.
+CAMERA_REGISTRY: Dict[str, Tuple[str, str]] = {
+    "front": (DEFAULT_FRONT_CAM, "observation.images.front"),
+    "wrist": (DEFAULT_WRIST_CAM, "observation.images.wrist"),
+}
+ALL_CAMERAS: List[str] = list(CAMERA_REGISTRY.keys())
+
 
 @dataclass
 class TopicMessages:
@@ -462,19 +471,24 @@ def print_analysis(session_dir: Path,
                    action_lag_ms: float,
                    tolerances_ms: List[float],
                    trim_to_overlap: bool = True,
+                   cameras: Optional[List[str]] = None,
                    plot: bool = False,
                    plot_dir: Optional[Path] = None,
                    plot_episode: Optional[str] = None,
                    plot_tolerance_ms: float = 20.0,
                    plot_start_s: float = 0.0,
                    plot_end_s: Optional[float] = 5.0) -> None:
-    obs_topics = [DEFAULT_JOINT_STATE, DEFAULT_FRONT_CAM, DEFAULT_WRIST_CAM]
+    if cameras is None:
+        cameras = list(ALL_CAMERAS)
+    cam_topics = [CAMERA_REGISTRY[c][0] for c in cameras]
+    obs_topics = [DEFAULT_JOINT_STATE] + cam_topics
     action_topics = [DEFAULT_CMD_VEL, DEFAULT_ARM_CMD]
     all_topics = list(dict.fromkeys(obs_topics + action_topics))
 
     print(f"\n=== Sync analysis for session {session_dir} ===")
     print(f"  action_lag_ms = {action_lag_ms}")
     print(f"  trim_to_overlap = {trim_to_overlap}")
+    print(f"  cameras = {cameras or '(none)'}")
     if plot:
         print(f"  plot = True (episode={plot_episode or 'first usable'})")
     plot_done = False
@@ -722,8 +736,9 @@ def _decode_compressed(msg) -> Optional[np.ndarray]:
 
 def _default_features(fps: int, use_videos: bool,
                       front_shape: Tuple[int, int, int],
-                      wrist_shape: Tuple[int, int, int]) -> dict:
-    return {
+                      wrist_shape: Tuple[int, int, int],
+                      cameras: List[str]) -> dict:
+    features = {
         "observation.state": {
             "dtype": "float32",
             "shape": (9,),
@@ -733,16 +748,6 @@ def _default_features(fps: int, use_videos: bool,
                 "arm_wrist_roll.pos", "arm_gripper.pos",
                 "x.vel", "y.vel", "theta.vel",
             ],
-        },
-        "observation.images.front": {
-            "dtype": "video" if use_videos else "image",
-            "shape": front_shape,
-            "names": ["height", "width", "channels"],
-        },
-        "observation.images.wrist": {
-            "dtype": "video" if use_videos else "image",
-            "shape": wrist_shape,
-            "names": ["height", "width", "channels"],
         },
         "action": {
             "dtype": "float32",
@@ -755,6 +760,15 @@ def _default_features(fps: int, use_videos: bool,
             ],
         },
     }
+    cam_shapes = {"front": front_shape, "wrist": wrist_shape}
+    for cam in cameras:
+        feature_key = CAMERA_REGISTRY[cam][1]
+        features[feature_key] = {
+            "dtype": "video" if use_videos else "image",
+            "shape": cam_shapes[cam],
+            "names": ["height", "width", "channels"],
+        }
+    return features
 
 
 def convert_session(session_dir: Path,
@@ -771,11 +785,15 @@ def convert_session(session_dir: Path,
                     resume: bool,
                     front_shape: Tuple[int, int, int],
                     wrist_shape: Tuple[int, int, int],
+                    cameras: Optional[List[str]] = None,
                     trim_to_overlap: bool = True) -> None:
 
     LeRobotDataset = _import_lerobot()
 
-    obs_topics = [DEFAULT_JOINT_STATE, DEFAULT_FRONT_CAM, DEFAULT_WRIST_CAM]
+    if cameras is None:
+        cameras = list(ALL_CAMERAS)
+    cam_topics = [CAMERA_REGISTRY[c][0] for c in cameras]
+    obs_topics = [DEFAULT_JOINT_STATE] + cam_topics
     action_topics = [DEFAULT_CMD_VEL, DEFAULT_ARM_CMD]
     all_topics = list(dict.fromkeys(obs_topics + action_topics))
 
@@ -798,11 +816,11 @@ def convert_session(session_dir: Path,
                 f"Dataset already exists: {dataset_path}. "
                 f"Delete it or use --resume.")
         features = _default_features(
-            fps, use_videos, front_shape, wrist_shape)
+            fps, use_videos, front_shape, wrist_shape, cameras)
         dataset = LeRobotDataset.create(
             repo_id=dataset_repo_id,
             fps=fps,
-            root=str(dataset_root),
+            root=str(dataset_path),
             robot_type=robot_type,
             features=features,
             use_videos=use_videos,
@@ -875,52 +893,52 @@ def convert_session(session_dir: Path,
 
         ep_kept = 0
         ep_dropped = 0
+        cam_shapes = {"front": front_shape, "wrist": wrist_shape}
         for i, base_ts in enumerate(base_stamps):
             if max_gap[i] > sync_tolerance_ms:
                 ep_dropped += 1
                 continue
 
             js_tm = msgs.get(DEFAULT_JOINT_STATE)
-            front_tm = msgs.get(DEFAULT_FRONT_CAM)
-            wrist_tm = msgs.get(DEFAULT_WRIST_CAM)
             arm_cmd_tm = msgs.get(DEFAULT_ARM_CMD)
             cmd_vel_tm = msgs.get(DEFAULT_CMD_VEL)
-            if not (js_tm and front_tm and wrist_tm
-                    and arm_cmd_tm and cmd_vel_tm):
+            cam_tms = {c: msgs.get(CAMERA_REGISTRY[c][0]) for c in cameras}
+            if not (js_tm and arm_cmd_tm and cmd_vel_tm
+                    and all(cam_tms.values())):
                 ep_dropped += 1
                 continue
 
             js_msg = js_tm.messages[_nearest_index(js_tm.stamps_ns, base_ts)]
-            front_msg = front_tm.messages[
-                _nearest_index(front_tm.stamps_ns, base_ts)]
-            wrist_msg = wrist_tm.messages[
-                _nearest_index(wrist_tm.stamps_ns, base_ts)]
             action_target = base_ts + lag_ns
             arm_cmd_msg = arm_cmd_tm.messages[
                 _nearest_index(arm_cmd_tm.stamps_ns, action_target)]
             cmd_vel_msg = cmd_vel_tm.messages[
                 _nearest_index(cmd_vel_tm.stamps_ns, action_target)]
 
-            front_img = _decode_compressed(front_msg)
-            wrist_img = _decode_compressed(wrist_msg)
-            if front_img is None or wrist_img is None:
+            # Decode + resize only the selected cameras.
+            cam_imgs: Dict[str, np.ndarray] = {}
+            decode_failed = False
+            for c, tm in cam_tms.items():
+                msg = tm.messages[_nearest_index(tm.stamps_ns, base_ts)]
+                img = _decode_compressed(msg)
+                if img is None:
+                    decode_failed = True
+                    break
+                h, w, _ = cam_shapes[c]
+                if img.shape[:2] != (h, w):
+                    img = cv2.resize(img, (w, h))
+                cam_imgs[c] = img
+            if decode_failed:
                 ep_dropped += 1
                 continue
-            # Resize if necessary
-            fh, fw, _ = front_shape
-            if front_img.shape[:2] != (fh, fw):
-                front_img = cv2.resize(front_img, (fw, fh))
-            wh, ww, _ = wrist_shape
-            if wrist_img.shape[:2] != (wh, ww):
-                wrist_img = cv2.resize(wrist_img, (ww, wh))
 
             frame = {
                 "observation.state": _joint_state_to_state_vec(js_msg),
-                "observation.images.front": front_img,
-                "observation.images.wrist": wrist_img,
                 "action": _action_vec(arm_cmd_msg, cmd_vel_msg),
                 "task": ep_task,
             }
+            for c, img in cam_imgs.items():
+                frame[CAMERA_REGISTRY[c][1]] = img
             dataset.add_frame(frame)
             ep_kept += 1
 
@@ -972,6 +990,7 @@ def convert_session(session_dir: Path,
             "action_lag_ms": action_lag_ms,
             "fps": fps,
             "use_videos": use_videos,
+            "cameras": list(cameras),
             "front_shape": list(front_shape),
             "wrist_shape": list(wrist_shape),
             "robot_type": robot_type,
@@ -988,6 +1007,7 @@ def convert_session(session_dir: Path,
             "sync_base_topic": sync_base_topic,
             "sync_tolerance_ms": sync_tolerance_ms,
             "action_lag_ms": action_lag_ms,
+            "cameras": list(cameras),
         },
         totals={"kept": total_kept, "dropped": total_dropped},
     )
@@ -1200,11 +1220,25 @@ def main() -> None:
     p.add_argument("--use-videos", action="store_true", default=True)
     p.add_argument("--no-videos", dest="use_videos", action="store_false")
     p.add_argument("--resume", action="store_true")
+    p.add_argument("--cameras", nargs="*", default=None,
+                   choices=ALL_CAMERAS,
+                   help="Which cameras to include as image features "
+                        f"(choices: {ALL_CAMERAS}). Default: all. "
+                        "Pass a subset (e.g. --cameras front) to drop the "
+                        "others; pass --no-cameras for a state/action-only "
+                        "dataset. Applies to both analyze and convert.")
+    p.add_argument("--no-cameras", dest="cameras", action="store_const",
+                   const=[],
+                   help="Exclude all image features (state/action only).")
     p.add_argument("--front-shape", type=int, nargs=3, default=[480, 640, 3],
                    help="H W C for observation.images.front.")
     p.add_argument("--wrist-shape", type=int, nargs=3, default=[640, 480, 3],
                    help="H W C for observation.images.wrist.")
     args = p.parse_args()
+
+    # Resolve camera selection: None (flag absent) -> all cameras.
+    cameras: List[str] = (
+        list(ALL_CAMERAS) if args.cameras is None else list(args.cameras))
 
     session_dir: Path = args.session_dir.expanduser().resolve()
     if not session_dir.is_dir():
@@ -1228,6 +1262,7 @@ def main() -> None:
             action_lag_ms=args.action_lag_ms,
             tolerances_ms=args.tolerance_sweep_ms,
             trim_to_overlap=args.trim_to_overlap,
+            cameras=cameras,
             plot=args.plot,
             plot_dir=(args.plot_dir.expanduser().resolve()
                       if args.plot_dir else None),
@@ -1268,6 +1303,7 @@ def main() -> None:
         resume=args.resume,
         front_shape=tuple(args.front_shape),
         wrist_shape=tuple(args.wrist_shape),
+        cameras=cameras,
         trim_to_overlap=args.trim_to_overlap,
     )
 

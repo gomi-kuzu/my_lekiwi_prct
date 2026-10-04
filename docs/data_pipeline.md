@@ -240,6 +240,7 @@ rm -rf $HOME/lekiwi_bags/session_20260924_120000/episode_000002
 | `--action-lag-ms` | action 側 stamp に加算するオフセット [ms] | `0.0` | 0 が無難。テレオペの遅延補正には `+15〜+33 ms` |
 | `--tolerance-sweep-ms` | analyze で表示するズレ許容幅の一覧 | `5 10 15 20 25 30 40 50 75 100` | 適宜変更 |
 | `--trim-to-overlap` / `--no-trim-to-overlap` | 全トピックが揃って流れている区間だけに基準フレームを絞るか | `--trim-to-overlap`（ON） | 基本 ON のまま |
+| `--cameras [front wrist ...]` / `--no-cameras` | dataset に含める画像特徴量（カメラ）の選択 | 全カメラ | 不要なカメラを省く / 画像なしの軽量 dataset を作る |
 
 **action lag のデフォルトについて**: 一般的な imitation learning は「観測 obs\_t と、その瞬間の action\_t」を対で学ぶため `0` が自然です。leader arm 読み取り → 送信 → 受信の遅延が片側に偏っている場合のみ `+1/fps` (30Hz なら +33 ms) 程度で試してください。
 
@@ -317,7 +318,42 @@ ros2 run lekiwi_ros2_teleop lekiwi_rosbag_to_lerobot \
 
 要するに **パネル 1・2 が「同期前の生の素性」**、**パネル 3 が「同期後の結果」** で、同じ時間軸で上下に並ぶため前後比較ができる。
 
-### 4.7 基本コマンド
+### 4.7 カメラ（画像特徴量）の選択（`--cameras` / `--no-cameras`）
+
+bag には両カメラが入っていても、**変換時に含める画像特徴量を選べる**。`observation.state` と `action` は常に含まれ、カメラだけが可変。`analyze` と `convert` の両方に効く（analyze 側も選択したカメラだけで同期判定するので、convert と同じ drop 率が得られる）。
+
+| 指定 | 生成される画像特徴量 | 用途 |
+|---|---|---|
+| （指定なし） | `observation.images.front` と `observation.images.wrist` | 通常 |
+| `--cameras front` | `observation.images.front` のみ | 片方のカメラだけ使う |
+| `--cameras wrist` | `observation.images.wrist` のみ | 〃 |
+| `--no-cameras` | 画像なし（`state` / `action` のみ） | 軽量・デバッグ用、proprioception だけのポリシー検証 |
+
+```bash
+# front カメラだけを含めて変換
+ros2 run lekiwi_ros2_teleop lekiwi_rosbag_to_lerobot \
+    --session-dir $HOME/lekiwi_bags/session_20260924_120000 \
+    --mode convert \
+    --dataset-repo-id john/lekiwi_pick_place_frontonly \
+    --fps 15 --sync-tolerance-ms 20 \
+    --cameras front
+
+# 画像を一切含めない state/action のみの dataset
+ros2 run lekiwi_ros2_teleop lekiwi_rosbag_to_lerobot \
+    --session-dir $HOME/lekiwi_bags/session_20260924_120000 \
+    --mode convert \
+    --dataset-repo-id john/lekiwi_pick_place_noimg \
+    --fps 15 --sync-tolerance-ms 20 \
+    --no-cameras
+```
+
+補足:
+
+- 省いたカメラは **読み込み・同期判定・特徴量生成のすべてから除外**される（そのカメラが原因の drop も起きない）。
+- 選んだカメラの組み合わせは `provenance/conversion.json` と `meta/info.json` の `x_lekiwi.conversion_params.cameras` に記録される。
+- カメラを減らすと基準トピックの自動選択（最低周波数の observation）も変わり得る。明示したい場合は `--sync-base-topic` を併用する。
+
+### 4.8 基本コマンド
 
 
 ```bash
