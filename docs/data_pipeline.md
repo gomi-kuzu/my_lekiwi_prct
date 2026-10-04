@@ -143,6 +143,42 @@ ros2 service call /lekiwi_bag_recorder/start_episode std_srvs/srv/Trigger
 ros2 service call /lekiwi_bag_recorder/stop_episode  std_srvs/srv/Trigger
 ```
 
+#### 既存セッションへの追記録画（途中から別エピソードを足す）
+
+レコーダを一度落としても、**同じ `session_name` を明示して再起動すれば**、既存の `episode_XXXXXX/` の続き番号から追加録画できる（`_detect_next_episode_index()` が既存の最大 index + 1 を自動採用する）。
+
+```bash
+# 既存セッションに続けて録画する（session_name を必ず明示）
+ros2 launch lekiwi_ros2_teleop lekiwi_bag_record.launch.py \
+    launch_teleop:=false \
+    output_root:=$HOME/lekiwi_bags \
+    session_name:=session_20260924_120000 \
+    single_task:="Pick and place the bottle cap"
+```
+
+ポイント:
+
+- **`session_name` を省略すると起動時刻から新しいセッション名が生成される**ため、同一ディレクトリに追記したい場合は必ず既存名を渡す。
+- 再起動時に既存 `session.yaml` があれば、その **`session_uuid` / `created_at` を引き継ぐ**（各 `episode.yaml` の `session_uuid` と整合する）。`updated_at` が追記時刻に更新される。
+- `single_task` / `robot_type` / `target_fps` / `topics` が前回と変わっている場合は警告を出す（新しい値で上書きして続行する）。意図しない取り違えに気付けるようにするため。
+
+#### 失敗エピソードの削除と、削除後の追記録画・変換
+
+各エピソードは `episode_XXXXXX/`（`bag/` と `episode.yaml`）で**完全に自己完結**しており、相互参照は無い。失敗した実演はディレクトリごと削除してよく、他エピソードには影響しない。
+
+```bash
+# 失敗エピソードを丸ごと削除
+rm -rf $HOME/lekiwi_bags/session_20260924_120000/episode_000002
+```
+
+削除後に追記録画・`convert` しても問題ない。理由と番号の挙動:
+
+- **convert は連番を要求しない**。[rosbag_to_lerobot.py](../lekiwi_ros2_teleop/rosbag_to_lerobot.py) の `_find_episodes()` は `episode_*` をソートして拾うだけで、番号が飛んでいても（例 `000000, 000001, 000003`）そのまま処理する。`bag/` が無い / 空の bag は `[skip]` で飛ばす。**出力側の `episode_index` は LeRobot が 0 から振り直す**ため、欠番は詰められて連番になる。
+- **追記録画の次番号は「残っている最大番号 + 1」**（`_detect_next_episode_index()`）。
+  - 末尾を削除（例 `000003`）してから録画 → 次は再び `000003`（空き番号を再利用、衝突なし）。
+  - 中間を削除（例 `000001` を消して `000003` は残す）してから録画 → 次は `000004`（`000001` は欠番のまま）。いずれも convert は穴を無視するので実害なし。
+- レコーダを強制終了した等で `episode.yaml` に `stop_time` / `bag_sha256` が無い bag でも、`bag/` が読めれば convert は変換を試みる。壊れている疑いがあるものは convert 前に削除しておくのが安全。
+
 ### 3.8 既知の制約と今後の改善（収集レート）
 
 **現状（2026-10 時点）: カメラは実効 15Hz で運用する。**

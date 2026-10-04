@@ -97,7 +97,34 @@ class LeKiwiBagRecorder(Node):
         self.session_dir = self.output_root / session_name
         self.session_dir.mkdir(parents=True, exist_ok=True)
 
-        self.session_uuid = str(uuid.uuid4())
+        # If a session.yaml already exists (e.g. recorder was stopped and
+        # relaunched against the same session_name to append more episodes),
+        # reuse its session_uuid / created_at so appended episodes stay tied to
+        # the original session. A fresh UUID would break provenance linkage.
+        session_yaml_path = self.session_dir / "session.yaml"
+        existing_session: Optional[dict] = None
+        if session_yaml_path.exists():
+            try:
+                with session_yaml_path.open() as f:
+                    existing_session = yaml.safe_load(f) or {}
+            except Exception as e:  # noqa: BLE001
+                self.get_logger().warn(
+                    f"Failed to read existing session.yaml ({e}); "
+                    "treating as a new session.")
+                existing_session = None
+
+        if existing_session and existing_session.get("session_uuid"):
+            self.session_uuid = str(existing_session["session_uuid"])
+            created_at = existing_session.get(
+                "created_at",
+                datetime.now(timezone.utc).isoformat(timespec="seconds"))
+            self.get_logger().info(
+                f"Resuming existing session '{session_name}' "
+                f"(uuid={self.session_uuid}); appending new episodes.")
+        else:
+            self.session_uuid = str(uuid.uuid4())
+            created_at = datetime.now(timezone.utc).isoformat(
+                timespec="seconds")
 
         # Collect provenance snapshots (once per session).
         pkg_git = package_git_info()
@@ -117,11 +144,28 @@ class LeKiwiBagRecorder(Node):
             "wrist_camera_id": self.get_parameter("wrist_camera_id").value,
         }
 
+        # When resuming, warn on key metadata changes so a silently mismatched
+        # session doesn't mix incompatible episodes.
+        if existing_session:
+            for key, new_val in (
+                ("single_task", self.single_task),
+                ("robot_type", self.robot_type),
+                ("target_fps", self.target_fps),
+                ("topics", self.topics),
+            ):
+                old_val = existing_session.get(key)
+                if old_val is not None and old_val != new_val:
+                    self.get_logger().warn(
+                        f"Resumed session '{key}' changed: "
+                        f"{old_val!r} -> {new_val!r}. "
+                        "Appended episodes will use the new value.")
+
         # Write session-level meta
         session_meta = {
             "session_name": session_name,
             "session_uuid": self.session_uuid,
-            "created_at": datetime.now(timezone.utc).isoformat(
+            "created_at": created_at,
+            "updated_at": datetime.now(timezone.utc).isoformat(
                 timespec="seconds"),
             "robot_type": self.robot_type,
             "target_fps": self.target_fps,
@@ -134,7 +178,7 @@ class LeKiwiBagRecorder(Node):
             "hardware": hardware,
             "signal_spec": build_signal_spec(),
         }
-        with (self.session_dir / "session.yaml").open("w") as f:
+        with session_yaml_path.open("w") as f:
             yaml.safe_dump(session_meta, f, sort_keys=False,
                            allow_unicode=True)
 
