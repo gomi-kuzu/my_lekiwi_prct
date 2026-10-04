@@ -321,15 +321,6 @@ def print_analysis(session_dir: Path,
         print(f"  {ep_dir.name}: base={base} frames={stats.base_count}")
         for fi in freq_info:
             print(f"      {fi}")
-        # Recommend an --fps that matches the base topic's real rate, since
-        # LeRobot stores timestamp = frame_index / fps.
-        base_tm = msgs.get(base)
-        if base_tm and len(base_tm.stamps_ns) >= 2:
-            span = (base_tm.stamps_ns[-1] - base_tm.stamps_ns[0]) / 1e9
-            base_hz = (len(base_tm.stamps_ns) - 1) / span if span > 0 else 0.0
-            if base_hz > 0:
-                print(f"      -> set --fps {round(base_hz)} at convert "
-                      f"(base '{base}' runs at ~{base_hz:.1f}Hz)")
         if missing_topics:
             print(f"      [WARN] entirely-missing topics excluded from "
                   f"gap stats: {missing_topics}")
@@ -540,20 +531,6 @@ def convert_session(session_dir: Path,
         max_gap = stats.max_gap_per_frame_ms
 
         base_stamps = msgs[base].stamps_ns
-
-        # Sanity check: LeRobot assigns timestamp = frame_index / fps, so the
-        # base topic's actual rate must match --fps or the stored timestamps
-        # become physically wrong (e.g. 15Hz data labelled as 30Hz).
-        if len(base_stamps) >= 2:
-            span = (base_stamps[-1] - base_stamps[0]) / 1e9
-            base_hz = (len(base_stamps) - 1) / span if span > 0 else 0.0
-            if base_hz > 0 and abs(base_hz - fps) / fps > 0.15:
-                print(f"  [WARN] {ep_dir.name}: base topic '{base}' measured "
-                      f"~{base_hz:.1f}Hz but --fps={fps}. Stored timestamps "
-                      f"(index/fps) will not match real time. Re-run with "
-                      f"--fps {round(base_hz)} or pick a base topic that runs "
-                      f"at {fps}Hz.")
-
         lag_ns = int(action_lag_ms * 1_000_000)
 
         ep_kept = 0
