@@ -143,30 +143,6 @@ ros2 service call /lekiwi_bag_recorder/start_episode std_srvs/srv/Trigger
 ros2 service call /lekiwi_bag_recorder/stop_episode  std_srvs/srv/Trigger
 ```
 
-### 3.8 既知の制約と今後の改善（収集レート）
-
-**現状（2026-10 時点）: カメラは実効 15Hz で運用する。**
-
-計測で判明した事実:
-
-- `control_frequency=30.0` を指定しているが、カメラ有効時は `/lekiwi/joint_states`・両カメラとも **publish 段階で ~15Hz**（`ros2 topic hz` でライブ計測、間隔 63〜69ms と非常に安定）。
-- **カメラを無効化（`enable_cameras:=false`）すると `/lekiwi/joint_states` は 30Hz ちょうど**出る。
-- したがって `lekiwi_bag_recorder` / QoS は無実で、律速点は **teleop ノードの制御ループ内カメラ取得経路**（Raspberry Pi の USB 帯域・CPU などハード依存を含む）。
-
-当面の方針:
-
-- **カメラ 15Hz を受け入れ、データセットも 15Hz に揃える**。`convert` 時は `--fps 15` を指定する（`--fps 30` にすると `timestamp = frame_index / fps` が物理時間とズレ、変換時に警告が出る）。
-- 画像観測が 15Hz である以上、学習できるポリシーの実効制御周期も 15Hz が上限。固有受容感覚（joint_states）だけ 30Hz 化しても画像が追いつかないため、現時点では分離しない。
-
-**今後の改善候補（優先度順、未着手）:**
-
-1. **状態量とカメラの publish を別タイマー/別コールバックグループに分離**（`ReentrantCallbackGroup` + `MultiThreadedExecutor`）。カメラが 15Hz のままでも `joint_states` / action 系を 30Hz で記録でき、オフライン変換側の最近傍同期と相性が良い。
-2. **カメラ取得の非同期化**: LeRobot の `OpenCVCamera` は既に背景スレッド読み出し（`read_latest()` は非ブロッキング）。それでも 15Hz に落ちる原因を切り分ける（USB 帯域競合 vs 単体デバイス上限）。`lsusb -t` で 2 台が同一 USB コントローラ配下でないか確認し、別バスへ分散する。
-3. **解像度・fourcc の最適化**: 既に `fourcc="MJPG"` 設定済み。さらに解像度を下げる / 2 台のカメラ負荷を分散するなどで 30fps 到達可能か検証する。
-4. 上記で 30Hz 化できた場合は、`convert` の `--fps` を 30 に戻す。
-
-> 補足: Raspberry Pi などホスト側のハード制約に依存するため、ハードウェア構成（USB ハブの有無、カメラ機種）を変えた場合は再計測してこの節を更新する。
-
 ---
 
 ## 4. ステージ 2: フォーマッティング (Formatting)
@@ -468,12 +444,6 @@ lekiwi_validate  --dataset-repo-id john/lekiwi_pick_place_v1
 ### コード変更後の dataset 再現性
 
 - `provenance/conversion.json` の `conversion_git_commit` と `conversion_git_workspace.commit` を checkout し、`conversion_params.argv` をそのまま実行すれば同一 dataset が再生成できます（raw bag が改変されていないことは `bag_sha256` で検証可能）。
-
-### カメラ/トピックのレートが想定より低い（例: 30Hz 設定なのに 15Hz）
-
-- `ros2 topic hz <topic>` でライブのレートを計測する。bag ではなく **publish 段階**で既に低いかを最初に確認する。
-- `enable_cameras:=false` で起動して `/lekiwi/joint_states` が 30Hz 出るなら、律速点は teleop ノードのカメラ取得経路（[§3.8](#38-既知の制約と今後の改善収集レート)）。
-- カメラが律速なら当面 `--fps 15` でデータセットを揃える。改善候補は [§3.8](#38-既知の制約と今後の改善収集レート) を参照。
 
 ---
 
