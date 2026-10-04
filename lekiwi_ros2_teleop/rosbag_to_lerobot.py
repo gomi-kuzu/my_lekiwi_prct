@@ -38,7 +38,7 @@ import json
 import os
 import shutil
 import sys
-from bisect import bisect_left
+from bisect import bisect_left, bisect_right
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -183,6 +183,62 @@ def _nearest_index(stamps: List[int], target: int) -> int:
     return pos if (after - target) < (target - before) else pos - 1
 
 
+def compute_overlap_window(topic_msgs: Dict[str, "TopicMessages"],
+                           topics: List[str]) -> Optional[Tuple[int, int]]:
+    """Return the time window [start_ns, end_ns] in which *all* given topics
+    have messages, i.e. ``[max(first stamp), min(last stamp)]``.
+
+    This is the interval where every topic is actually streaming, so pairing
+    the base topic only inside it removes the episode-edge "holes" where an
+    action topic (leader arm / joy) has not started yet or already stopped.
+    Topics with no messages are ignored (they cannot bound the overlap and are
+    handled separately as fully-missing). Returns ``None`` if there is no
+    overlap or no usable topic.
+    """
+    firsts: List[int] = []
+    lasts: List[int] = []
+    for t in topics:
+        tm = topic_msgs.get(t)
+        if tm and tm.stamps_ns:
+            firsts.append(tm.stamps_ns[0])
+            lasts.append(tm.stamps_ns[-1])
+    if not firsts:
+        return None
+    start = max(firsts)
+    end = min(lasts)
+    if start > end:
+        return None
+    return start, end
+
+
+def trim_base_to_window(topic_msgs: Dict[str, "TopicMessages"],
+                        base_topic: str,
+                        window: Optional[Tuple[int, int]]) -> Tuple[int, int]:
+    """Restrict the base topic's frames to ``window`` (mutates the entry).
+
+    Only the base topic is trimmed; the paired topics keep all their messages
+    so nearest-neighbor lookups near the edges still have valid candidates.
+    Returns ``(n_trimmed_head, n_trimmed_tail)``.
+    """
+    if window is None:
+        return 0, 0
+    base = topic_msgs.get(base_topic)
+    if base is None or not base.stamps_ns:
+        return 0, 0
+    start, end = window
+    stamps = base.stamps_ns
+    lo = bisect_left(stamps, start)
+    hi = bisect_right(stamps, end)
+    n_head = lo
+    n_tail = len(stamps) - hi
+    if n_head == 0 and n_tail == 0:
+        return 0, 0
+    base.stamps_ns = stamps[lo:hi]
+    base.messages = base.messages[lo:hi]
+    return n_head, n_tail
+
+
+
 @dataclass
 class MatchStats:
     """Statistics of nearest-neighbor gaps for one episode."""
@@ -266,16 +322,24 @@ def print_analysis(session_dir: Path,
                    episode_dirs: List[Path],
                    sync_base_topic: Optional[str],
                    action_lag_ms: float,
-                   tolerances_ms: List[float]) -> None:
+                   tolerances_ms: List[float],
+                   trim_to_overlap: bool = True) -> None:
     obs_topics = [DEFAULT_JOINT_STATE, DEFAULT_FRONT_CAM, DEFAULT_WRIST_CAM]
     action_topics = [DEFAULT_CMD_VEL, DEFAULT_ARM_CMD]
     all_topics = list(dict.fromkeys(obs_topics + action_topics))
 
     print(f"\n=== Sync analysis for session {session_dir} ===")
     print(f"  action_lag_ms = {action_lag_ms}")
+    print(f"  trim_to_overlap = {trim_to_overlap}")
 
     aggregate_gaps: List[np.ndarray] = []
     per_episode_rows: List[Tuple[str, str, int, np.ndarray]] = []
+    # Per-paired-topic gaps aggregated across episodes, so we can tell which
+    # topic is responsible for the max-gap (and therefore the drops).
+    per_topic_gaps: Dict[str, List[np.ndarray]] = {}
+    # How often each topic is the single worst (argmax) contributor per frame.
+    per_topic_worst_count: Dict[str, int] = {}
+    total_frames_for_worst = 0
 
     for ep_dir in episode_dirs:
         bag_dir = ep_dir / "bag"
@@ -312,15 +376,41 @@ def print_analysis(session_dir: Path,
         missing_topics = [t for t in obs_topics + action_topics
                           if t not in present_obs + present_act]
 
+        # Auto-trim the base topic to the window where *all present* topics
+        # are streaming, removing episode-edge frames where an action topic
+        # has not started yet / has already stopped.
+        n_head = n_tail = 0
+        if trim_to_overlap:
+            window = compute_overlap_window(
+                msgs, present_obs + present_act)
+            n_head, n_tail = trim_base_to_window(msgs, base, window)
+
         stats = compute_match_stats(
             msgs, base, present_obs, present_act, action_lag_ms)
         max_gap = stats.max_gap_per_frame_ms
         aggregate_gaps.append(max_gap)
         per_episode_rows.append(
             (ep_dir.name, base, stats.base_count, max_gap))
+
+        # Accumulate per-topic gaps and per-frame worst contributor.
+        if stats.gaps_ms:
+            paired = list(stats.gaps_ms.keys())
+            for t in paired:
+                per_topic_gaps.setdefault(t, []).append(stats.gaps_ms[t])
+            stacked = np.stack([stats.gaps_ms[t] for t in paired], axis=0)
+            worst_idx = np.argmax(stacked, axis=0)
+            for k, t in enumerate(paired):
+                per_topic_worst_count[t] = (
+                    per_topic_worst_count.get(t, 0)
+                    + int(np.sum(worst_idx == k)))
+            total_frames_for_worst += stats.base_count
+
         print(f"  {ep_dir.name}: base={base} frames={stats.base_count}")
         for fi in freq_info:
             print(f"      {fi}")
+        if trim_to_overlap and (n_head or n_tail):
+            print(f"      [trim] dropped {n_head} head + {n_tail} tail base "
+                  f"frames outside the all-topic overlap window")
         # Recommend an --fps that matches the base topic's real rate, since
         # LeRobot stores timestamp = frame_index / fps.
         base_tm = msgs.get(base)
@@ -373,6 +463,38 @@ def print_analysis(session_dir: Path,
               f"p99={q[3]:.2f}  max={q[4]:.2f}  "
               f"(over {finite_gaps.size} frames with all paired topics "
               f"present)")
+
+    # Per-topic gap breakdown: which paired topic drives the max-gap (= drops).
+    if per_topic_gaps:
+        print("\n--- Per-paired-topic gap breakdown (ms) ---")
+        print("  gap = |base stamp - nearest message of this topic|. "
+              "The frame's max-gap is the worst of these.")
+        header = (f"  {'topic':<48} | {'p50':>7} | {'p95':>7} | "
+                  f"{'max':>7} | {'worst%':>7}")
+        print(header)
+        print("  " + "-" * (len(header) - 2))
+        # Order by p95 descending so the worst offender is on top.
+        rows = []
+        for t, chunks in per_topic_gaps.items():
+            g = np.concatenate(chunks)
+            g = g[np.isfinite(g)]
+            if g.size == 0:
+                rows.append((t, float("inf"), float("inf"),
+                             float("inf"), per_topic_worst_count.get(t, 0)))
+                continue
+            p50, p95, gmax = np.quantile(g, [0.5, 0.95, 1.0])
+            rows.append((t, p50, p95, gmax,
+                         per_topic_worst_count.get(t, 0)))
+        rows.sort(key=lambda r: (r[2] if np.isfinite(r[2]) else 1e18),
+                  reverse=True)
+        for t, p50, p95, gmax, worst in rows:
+            worst_pct = (worst / total_frames_for_worst * 100.0
+                         if total_frames_for_worst else 0.0)
+            short = t if len(t) <= 48 else "..." + t[-45:]
+            print(f"  {short:<48} | {p50:>7.2f} | {p95:>7.2f} | "
+                  f"{gmax:>7.2f} | {worst_pct:>6.1f}%")
+        print("  worst% = share of frames where this topic is the single "
+              "largest gap (i.e. the one causing the drop).")
 
 
 # ============================================================
@@ -468,7 +590,9 @@ def convert_session(session_dir: Path,
                     action_lag_ms: float,
                     resume: bool,
                     front_shape: Tuple[int, int, int],
-                    wrist_shape: Tuple[int, int, int]) -> None:
+                    wrist_shape: Tuple[int, int, int],
+                    trim_to_overlap: bool = True) -> None:
+
     LeRobotDataset = _import_lerobot()
 
     obs_topics = [DEFAULT_JOINT_STATE, DEFAULT_FRONT_CAM, DEFAULT_WRIST_CAM]
@@ -535,6 +659,19 @@ def convert_session(session_dir: Path,
         if base not in msgs:
             print(f"[skip] {ep_dir.name}: base topic {base} missing")
             continue
+
+        # Auto-trim the base topic to the window where all present topics are
+        # streaming, so episode-edge frames (action topic not started yet /
+        # already stopped) are not force-dropped by the sync tolerance.
+        if trim_to_overlap:
+            present = [t for t in all_topics
+                       if msgs.get(t) and msgs[t].stamps_ns]
+            window = compute_overlap_window(msgs, present)
+            n_head, n_tail = trim_base_to_window(msgs, base, window)
+            if n_head or n_tail:
+                print(f"  {ep_dir.name}: [trim] dropped {n_head} head + "
+                      f"{n_tail} tail base frames outside overlap window")
+
         stats = compute_match_stats(
             msgs, base, obs_topics, action_topics, action_lag_ms)
         max_gap = stats.max_gap_per_frame_ms
@@ -849,6 +986,13 @@ def main() -> None:
     p.add_argument("--tolerance-sweep-ms", type=float, nargs="+",
                    default=DEFAULT_TOLERANCE_SWEEP_MS,
                    help="Tolerance values to report in analyze mode.")
+    p.add_argument("--trim-to-overlap", action="store_true", default=True,
+                   help="Trim base-topic frames to the window where all "
+                        "topics are streaming (removes episode-edge holes). "
+                        "On by default.")
+    p.add_argument("--no-trim-to-overlap", dest="trim_to_overlap",
+                   action="store_false",
+                   help="Disable the all-topic overlap trim.")
     # convert-only options
     p.add_argument("--dataset-repo-id",
                    help="username/dataset_name (convert mode)")
@@ -888,6 +1032,7 @@ def main() -> None:
             sync_base_topic=args.sync_base_topic,
             action_lag_ms=args.action_lag_ms,
             tolerances_ms=args.tolerance_sweep_ms,
+            trim_to_overlap=args.trim_to_overlap,
         )
         return
 
@@ -921,6 +1066,7 @@ def main() -> None:
         resume=args.resume,
         front_shape=tuple(args.front_shape),
         wrist_shape=tuple(args.wrist_shape),
+        trim_to_overlap=args.trim_to_overlap,
     )
 
 
