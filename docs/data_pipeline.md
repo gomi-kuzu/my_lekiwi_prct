@@ -83,13 +83,45 @@ flowchart LR
 | `~/start_episode` | `std_srvs/Trigger` | 新しい `episode_XXXXXX/` を作り bag 録画を開始 |
 | `~/stop_episode` | `std_srvs/Trigger` | bag を finalize、`bag_sha256` を計算、`episode.yaml` を更新 |
 
-### 3.5 前提: MCAP ストレージプラグイン
+### 3.5 前提: マシン間クロック同期の確認
+
+LeKiwi 本体・リーダーアーム側 PC・記録用ホストなど **複数マシンにまたがってテレオペする場合**、各トピックの `header.stamp` は発行元マシンのクロックで打たれる。クロックがズレていると Stage 2 の最近傍同期が構造的にズレ、`analyze` の gap 分布に実際より大きな値が出る（あるいは、見かけ上揃っているのに物理的には別時刻のデータを対にしてしまう）。
+
+そのため **収集を始める前に必ず NTP/PTP 同期を確認する**。chrony を使う場合は各マシンで:
+
+```bash
+# 同期ソースと到達状況を確認
+chronyc sources -v
+
+# 自マシンのシステムクロックが基準からどれだけズレているか
+chronyc tracking
+```
+
+確認ポイント:
+
+- `chronyc sources` の各行の先頭が `^*`（現在同期中のソース）になっているか。`^?` のままなら未到達、`^+` は候補で未採用。
+- `chronyc tracking` の `System time` / `Last offset` / `RMS offset` が **同期許容幅 `--sync-tolerance-ms`（通常 20ms 前後）より十分小さい**こと。ミリ秒オーダに収まっていれば問題ない。秒オーダのズレがある場合はそのまま収集しない。
+
+まだ chrony が入っていない / 同期していない場合のみセットアップする（**既に同期できていれば何もしなくてよい**）:
+
+```bash
+# 未導入のときだけ
+sudo apt install chrony
+sudo systemctl enable --now chrony
+
+# 全マシンを同一 NTP サーバ（LAN 内なら 1 台を基準サーバにしてもよい）に向け、
+# 数十秒後に再度 chronyc sources で ^* が付くことを確認する
+```
+
+> 複数マシン間の相対オフセットを直接見たい場合は、各マシンで `chronyc tracking` の `Last offset` を突き合わせるか、基準マシンに対して `chronyc sourcestats` を確認する。LAN 内で高精度が必要なら PTP（`linuxptp` / `ptp4l`）も選択肢。
+
+### 3.6 前提: MCAP ストレージプラグイン
 
 ```bash
 sudo apt install ros-jazzy-rosbag2-storage-mcap
 ```
 
-### 3.6 基本コマンド
+### 3.7 基本コマンド
 
 ```bash
 ros2 launch lekiwi_ros2_teleop lekiwi_bag_record.launch.py \
@@ -402,6 +434,7 @@ lekiwi_validate  --dataset-repo-id john/lekiwi_pick_place_v1
 ### `analyze` で drop 率がゼロにならない
 
 - 基準トピック側の欠損が原因のことが多いです。表示される「トピック別 msg数/実測 Hz」を確認し、明らかに周波数が低いカメラがあればそのカメラ設定を疑う。
+- 複数マシンでテレオペしている場合は **クロック同期ズレ**も疑う（[§3.5](#35-前提-マシン間クロック同期の確認)）。`chronyc tracking` の offset が秒オーダなら、gap はそのズレ分だけ底上げされる。
 - どうしても取り切れない場合は `--sync-tolerance-ms` を p99 付近に緩めるか、`--sync-base-topic` を joint_states 側に切り替えて再評価。
 
 ### info.json が LeRobot の CLI で読めない
