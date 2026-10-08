@@ -96,6 +96,18 @@ ros2 service call /lekiwi/policy/start std_srvs/srv/Trigger
 - `control_frequency`: 制御ループの周波数（デフォルト: `30.0` Hz)
 - `device`: 推論デバイス（デフォルト: `cuda`、他に `cpu`, `mps`）
 - `use_amp`: 自動混合精度を使用（デフォルト: `false`）
+- `n_action_steps`: 1回の推論で消費するアクション数（デフォルト: `0` = 学習時の値を使用）
+  - ACTのアクションチャンキングの挙動を推論時に調整するパラメータ。**再学習は不要**。
+  - 小さくすると、より頻繁に新しい観測で再推論するため反応性が向上（クローズドループに近づく）。
+  - 制約: `1 <= n_action_steps <= chunk_size`（例: 学習時 `chunk_size=100`）。
+- `temporal_ensemble_coeff`: ACTのTemporal Ensemblingを有効化（デフォルト: `-1.0` = 学習時の値を使用）
+  - `0` 以上を指定すると有効化（原論文の推奨値は `0.01`）。**再学習は不要**。
+  - 有効化すると `n_action_steps` は自動的に `1` に強制される（LeRobotの制約）。
+
+> **補足**: 学習済みモデルは `n_action_steps=100`, `chunk_size=100`, `temporal_ensemble_coeff=null`
+> の場合、1回の推論で得た100ステップを約3.3秒（30Hz時）かけてオープンループ実行してから
+> 次の推論を行います。反応性を高めたい場合は `n_action_steps` を小さくするか、
+> `temporal_ensemble_coeff` を有効化してください（いずれも再学習不要）。
 
 ### サービスでの制御
 

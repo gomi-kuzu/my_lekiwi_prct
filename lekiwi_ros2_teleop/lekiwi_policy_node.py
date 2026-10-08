@@ -126,6 +126,16 @@ class LeKiwiPolicyNode(Node):
         self.declare_parameter('device', 'cuda')
         self.declare_parameter('use_amp', False)
         self.declare_parameter('rename_map', '')
+        # Inference-time action chunking overrides (no retraining required).
+        # n_action_steps: number of actions consumed per policy inference.
+        #   0 (default) keeps the trained model's value. Smaller -> re-infer more
+        #   often with fresh observations (more reactive / closer to closed-loop).
+        #   Must satisfy 1 <= n_action_steps <= chunk_size.
+        self.declare_parameter('n_action_steps', 0)
+        # temporal_ensemble_coeff: enable ACT temporal ensembling when >= 0.
+        #   Negative (default) keeps the trained model's value (usually disabled).
+        #   When enabled, n_action_steps is forced to 1 (LeRobot constraint).
+        self.declare_parameter('temporal_ensemble_coeff', -1.0)
         
         # Get parameters
         policy_path_raw = self.get_parameter('policy_path').value
@@ -166,6 +176,16 @@ class LeKiwiPolicyNode(Node):
         self.latest_front_image: Optional[np.ndarray] = None
         self.latest_wrist_image: Optional[np.ndarray] = None
         self.observation_ready = False
+
+        # Whether the loaded policy/dataset expects camera images.
+        # Auto-detected from dataset features in _load_dataset(). When the
+        # dataset has no observation.images.* features (image-free policy),
+        # the node runs inference without waiting for camera topics.
+        self.require_front_image = True
+        self.require_wrist_image = True
+        # Feature set used to build observation frames. Populated in
+        # _configure_image_requirements() after the policy is loaded.
+        self.observation_features = None
         
         # QoS settings
         qos_profile = QoSProfile(
@@ -212,7 +232,14 @@ class LeKiwiPolicyNode(Node):
         self.get_logger().info(f'Policy path: {self.policy_path}')
         self.get_logger().info(f'Dataset: {self.dataset_repo_id}')
         self.get_logger().info(f'Task: {self.single_task}')
-        self.get_logger().info('Waiting for observations from /lekiwi/joint_states and camera topics...')
+        if self.require_front_image or self.require_wrist_image:
+            self.get_logger().info(
+                'Waiting for observations from /lekiwi/joint_states and camera topics...'
+            )
+        else:
+            self.get_logger().info(
+                'Waiting for observations from /lekiwi/joint_states (image-free, no cameras required)...'
+            )
     
     def joint_state_callback(self, msg: JointState):
         """Callback for receiving joint states from the robot."""
@@ -244,13 +271,21 @@ class LeKiwiPolicyNode(Node):
             self.get_logger().warn(f'Failed to decode wrist camera image: {e}')
     
     def _check_observation_ready(self):
-        """Check if all observation data is available."""
-        if (self.latest_joint_state is not None and 
-            self.latest_front_image is not None and 
-            self.latest_wrist_image is not None):
-            if not self.observation_ready:
-                self.get_logger().info('All observations received. Ready for inference.')
-            self.observation_ready = True
+        """Check if all observation data is available.
+
+        Camera images are only required when the loaded policy/dataset
+        actually expects them (auto-detected in _load_dataset()). This allows
+        image-free policies to run using only joint states.
+        """
+        if self.latest_joint_state is None:
+            return
+        if self.require_front_image and self.latest_front_image is None:
+            return
+        if self.require_wrist_image and self.latest_wrist_image is None:
+            return
+        if not self.observation_ready:
+            self.get_logger().info('All observations received. Ready for inference.')
+        self.observation_ready = True
     
     def _load_dataset(self):
         """Load the dataset to get metadata and features."""
@@ -267,11 +302,78 @@ class LeKiwiPolicyNode(Node):
             if 'observation.state' in self.dataset.features:
                 state_names = self.dataset.features['observation.state'].get('names', [])
                 self.get_logger().info(f'Expected observation.state names: {state_names}')
+
+            # Log image features present in the dataset (informational only).
+            # Whether the node actually waits for these cameras is decided by
+            # the policy config in _configure_image_requirements().
+            image_features = {
+                k for k in self.dataset.features if k.startswith('observation.images.')
+            }
+            if image_features:
+                self.get_logger().info(
+                    f'Dataset image features: {sorted(image_features)}'
+                )
             
         except Exception as e:
             self.get_logger().error(f'Failed to load dataset: {e}')
             raise
     
+    def _apply_chunking_overrides(self, policy_cfg):
+        """Override action chunking parameters at inference time.
+
+        Both ``n_action_steps`` and ``temporal_ensemble_coeff`` are inference-time
+        settings for ACT-style policies, so changing them does NOT require
+        retraining. They must be applied before ``make_policy`` builds the model.
+
+        Constraints enforced by LeRobot's ACTConfig:
+            - 1 <= n_action_steps <= chunk_size
+            - n_action_steps must be 1 when temporal ensembling is enabled
+        """
+        chunk_size = getattr(policy_cfg, 'chunk_size', None)
+
+        # Temporal ensembling: enabled when coeff >= 0.
+        te_coeff = self.get_parameter('temporal_ensemble_coeff').value
+        if te_coeff is not None and te_coeff >= 0.0:
+            if not hasattr(policy_cfg, 'temporal_ensemble_coeff'):
+                self.get_logger().warn(
+                    'Policy config has no temporal_ensemble_coeff; ignoring override.'
+                )
+            else:
+                policy_cfg.temporal_ensemble_coeff = float(te_coeff)
+                # LeRobot requires n_action_steps == 1 with temporal ensembling.
+                policy_cfg.n_action_steps = 1
+                self.get_logger().info(
+                    f'Temporal ensembling enabled (coeff={te_coeff}); '
+                    'n_action_steps forced to 1.'
+                )
+                return
+
+        # n_action_steps override: 0 keeps the trained model's value.
+        n_action_steps = self.get_parameter('n_action_steps').value
+        if n_action_steps and n_action_steps > 0:
+            if not hasattr(policy_cfg, 'n_action_steps'):
+                self.get_logger().warn(
+                    'Policy config has no n_action_steps; ignoring override.'
+                )
+            elif chunk_size is not None and n_action_steps > chunk_size:
+                self.get_logger().warn(
+                    f'n_action_steps={n_action_steps} exceeds chunk_size={chunk_size}; '
+                    f'clamping to {chunk_size}.'
+                )
+                policy_cfg.n_action_steps = chunk_size
+            else:
+                policy_cfg.n_action_steps = int(n_action_steps)
+                self.get_logger().info(
+                    f'n_action_steps overridden to {policy_cfg.n_action_steps} '
+                    f'(chunk_size={chunk_size}).'
+                )
+        else:
+            self.get_logger().info(
+                f'Using trained n_action_steps='
+                f'{getattr(policy_cfg, "n_action_steps", "?")} '
+                f'(chunk_size={chunk_size}).'
+            )
+
     def _load_policy(self):
         """Load the pretrained policy and processors."""
         self.get_logger().info(f'Loading policy from: {self.policy_path}')
@@ -311,6 +413,9 @@ class LeKiwiPolicyNode(Node):
             policy_cfg.device = self.get_parameter('device').value
             policy_cfg.use_amp = self.get_parameter('use_amp').value
             
+            # Override action chunking behavior at inference time (no retraining).
+            self._apply_chunking_overrides(policy_cfg)
+            
             # Apply rename_map to dataset metadata if provided
             if self.rename_map:
                 original_features = self.dataset.meta.info["features"]
@@ -323,6 +428,12 @@ class LeKiwiPolicyNode(Node):
             
             # Create policy
             self.policy = make_policy(policy_cfg, ds_meta=self.dataset.meta, rename_map=self.rename_map)
+
+            # Determine which camera images the POLICY actually consumes.
+            # The dataset may contain image features even when the trained
+            # policy ignores them (image-free policy). Use the policy config's
+            # image_features so we only wait for cameras the model needs.
+            self._configure_image_requirements(policy_cfg)
             
             # Build preprocessor overrides
             preprocessor_overrides = {
@@ -349,7 +460,53 @@ class LeKiwiPolicyNode(Node):
         except Exception as e:
             self.get_logger().error(f'Failed to load policy: {e}')
             raise
-    
+
+    def _configure_image_requirements(self, policy_cfg):
+        """Decide which camera images are required based on the policy config.
+
+        A policy trained without images (image-free) has no visual entries in
+        its ``image_features``/``input_features``, so the node should not wait
+        for camera topics even if the dataset still contains image features.
+        """
+        # policy_cfg.image_features is a list of input feature keys with
+        # visual type (e.g. 'observation.images.front'). Fall back to scanning
+        # input_features if the property is unavailable.
+        image_feature_keys = getattr(policy_cfg, 'image_features', None)
+        if image_feature_keys is None:
+            input_features = getattr(policy_cfg, 'input_features', {}) or {}
+            image_feature_keys = [
+                k for k in input_features if 'image' in k.lower()
+            ]
+        image_feature_keys = set(image_feature_keys)
+
+        # Resolve rename_map so short keys (e.g. camera1) are matched.
+        front_feature = 'observation.images.front'
+        wrist_feature = 'observation.images.wrist'
+        if self.rename_map:
+            front_feature = self.rename_map.get(front_feature, front_feature)
+            wrist_feature = self.rename_map.get(wrist_feature, wrist_feature)
+
+        self.require_front_image = front_feature in image_feature_keys
+        self.require_wrist_image = wrist_feature in image_feature_keys
+
+        # Build the feature set passed to build_dataset_frame(). Dataset may
+        # contain image features the policy does not use; drop those so the
+        # frame builder does not demand missing image observations.
+        self.observation_features = {
+            k: v for k, v in self.dataset.features.items()
+            if not (k.startswith('observation.images.') and k not in image_feature_keys)
+        }
+
+        if not image_feature_keys:
+            self.get_logger().info(
+                'Policy uses no camera images; running image-free inference '
+                '(camera topics not required).'
+            )
+        else:
+            self.get_logger().info(
+                f'Policy requires image features: {sorted(image_feature_keys)}'
+            )
+
     def start_callback(self, request, response):
         """Start policy inference."""
         if self.is_running:
@@ -410,9 +567,11 @@ class LeKiwiPolicyNode(Node):
             
             self.get_logger().debug('Control loop: building observation frame...', throttle_duration_sec=1.0)
             
-            # Build observation frame for policy
+            # Build observation frame for policy. Use observation_features
+            # (image features the policy ignores are excluded) so image-free
+            # policies don't require camera observations.
             observation_frame = build_dataset_frame(
-                self.dataset.features, 
+                self.observation_features, 
                 obs, 
                 prefix=OBS_STR
             )
