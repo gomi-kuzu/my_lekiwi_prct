@@ -237,12 +237,19 @@ rm -rf $HOME/lekiwi_bags/session_20260924_120000/episode_000002
 |---|---|---|---|
 | `--sync-base-topic` | 時刻同期の基準トピック | 未指定なら observation 系で最も低周波なものを自動選択 | カメラ側（通常 30Hz） |
 | `--sync-tolerance-ms` | 基準stampから他トピック最近傍までの最大許容ズレ [ms] | `20.0` | `analyze` の p95 付近。30Hz なら 15〜25 ms |
-| `--action-lag-ms` | action 側 stamp に加算するオフセット [ms] | `0.0` | 0 が無難。テレオペの遅延補正には `+15〜+33 ms` |
+| `--action-lag-ms` | 観測フレームに対し、**どの時刻の action をペアにするか**を前後にずらす [ms]（保存される timestamp は変えない） | `0.0` | 0 が無難。テレオペの観測→操作ラグ補正には `+15〜+33 ms` |
 | `--tolerance-sweep-ms` | analyze で表示するズレ許容幅の一覧 | `5 10 15 20 25 30 40 50 75 100` | 適宜変更 |
 | `--trim-to-overlap` / `--no-trim-to-overlap` | 全トピックが揃って流れている区間だけに基準フレームを絞るか | `--trim-to-overlap`（ON） | 基本 ON のまま |
 | `--cameras [front wrist ...]` / `--no-cameras` | dataset に含める画像特徴量（カメラ）の選択 | 全カメラ | 不要なカメラを省く / 画像なしの軽量 dataset を作る |
 
-**action lag のデフォルトについて**: 一般的な imitation learning は「観測 obs\_t と、その瞬間の action\_t」を対で学ぶため `0` が自然です。leader arm 読み取り → 送信 → 受信の遅延が片側に偏っている場合のみ `+1/fps` (30Hz なら +33 ms) 程度で試してください。
+**action lag が実際にやること**: このオプションは**保存される `timestamp` 列（`frame_index / fps`）を書き換えるものではありません**。やっているのは「観測フレームと action をペアにするときの、action 側の最近傍探索の基準時刻をずらす」ことです。基準（観測）フレームが実時刻 $T$ のとき:
+
+- `observation.state` ← 実時刻 $T$ の joint_states
+- `action` ← 実時刻 **$T + \text{lag}$** の `arm_joint_commands` / `cmd_vel`
+
+つまり**物理的に別時刻の観測と行動を意図的に束ねます**。人間は「観測を見てから遅れて操作する」ため、実時刻 $T$ の観測への反応は少し後（$T+\text{lag}$）の action として現れます。正の lag はこの観測→操作の遅延を補正する向き（観測 $T$ にその反応 action $T+\text{lag}$ を対応させる）に働きます。負値を与えれば action を先行させる逆向きのペアリングになります。
+
+**デフォルトについて**: 一般的な imitation learning は「観測 obs\_t と、その瞬間の action\_t」を対で学ぶため `0` が自然です。leader arm 読み取り → 送信 → 受信の遅延が片側に偏っている場合のみ `+1/fps` (30Hz なら +33 ms) 程度で試してください。`analyze` の gap 計算にも同じ lag が反映されるため、lag を変えると drop 率も変わります（整合的）。
 
 ### 4.5 overlap トリムとトピック別 gap 内訳
 
