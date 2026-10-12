@@ -136,6 +136,21 @@ class LeKiwiPolicyNode(Node):
         #   Negative (default) keeps the trained model's value (usually disabled).
         #   When enabled, n_action_steps is forced to 1 (LeRobot constraint).
         self.declare_parameter('temporal_ensemble_coeff', -1.0)
+        # clamp_zero_std_state: when True (default), any observation.state
+        #   dimension whose training std is ~0 (constant during data collection)
+        #   is forced to its training mean before inference. This avoids the
+        #   MEAN_STD normalizer dividing a nonzero deviation by ~0, which would
+        #   otherwise explode that input to ~1e5 and corrupt the policy's state
+        #   embedding. The dimension carried no information at training time, so
+        #   fixing it to the mean loses nothing.
+        self.declare_parameter('clamp_zero_std_state', True)
+        # zero_std_threshold: a state dimension is treated as degenerate when
+        #   its training std is below this value. The normalizer stores a tiny
+        #   nonzero std (e.g. ~4e-7) for constant signals rather than exact 0,
+        #   so an exact == 0 test misses them. Any std this small still blows up
+        #   the normalized input, so clamp those dims. Must stay well below the
+        #   smallest genuinely-varying dim's std (base velocities ~0.02 here).
+        self.declare_parameter('zero_std_threshold', 1e-4)
         
         # Get parameters
         policy_path_raw = self.get_parameter('policy_path').value
@@ -226,6 +241,7 @@ class LeKiwiPolicyNode(Node):
         # Initialize components
         self.get_logger().info('Initializing policy node...')
         self._load_dataset()
+        self._compute_zero_std_overrides()
         self._load_policy()
         
         self.get_logger().info('LeKiwi Policy Node initialized successfully!')
@@ -317,6 +333,77 @@ class LeKiwiPolicyNode(Node):
         except Exception as e:
             self.get_logger().error(f'Failed to load dataset: {e}')
             raise
+    
+    def _compute_zero_std_overrides(self):
+        """Detect observation.state dims with zero training std and fix them.
+
+        When ``clamp_zero_std_state`` is enabled, build a mapping from the
+        observation key (e.g. ``arm_gripper.pos``) to its training mean for
+        every state dimension whose training std is below ``zero_std_threshold``.
+        Constant signals are stored with a tiny nonzero std (e.g. ~4e-7) rather
+        than exactly 0, so a threshold is used instead of ``== 0``. Such
+        dimensions were constant during data collection, so the MEAN_STD
+        normalizer would divide any nonzero live deviation by ~0 and blow the
+        input up. Fixing the live value to the training mean yields a normalized
+        value of ~0, matching what the policy saw during training.
+
+        IMPORTANT: For a pretrained ACT policy, inference normalization uses the
+        statistics SAVED INSIDE THE MODEL (``*normalizer_processor.safetensors``),
+        NOT the dataset's ``stats.json`` (the passed ``dataset_stats`` is ignored
+        by LeRobot when loading pretrained processors). We therefore read the
+        model's own normalizer stats so detection matches the actual normalizer,
+        regardless of which dataset is passed at launch.
+        """
+        self.zero_std_overrides: Dict[str, float] = {}
+        if not self.get_parameter('clamp_zero_std_state').value:
+            self.get_logger().info('clamp_zero_std_state disabled; skipping.')
+            return
+        try:
+            from safetensors.torch import load_file
+
+            # Locate the preprocessor normalizer stats saved inside the model.
+            model_dir = Path(self.policy_path)
+            candidates = sorted(model_dir.glob('*normalizer_processor.safetensors'))
+            # Exclude the postprocessor (un)normalizer; keep the input normalizer.
+            candidates = [
+                p for p in candidates if 'unnormalizer' not in p.name
+            ]
+            if not candidates:
+                self.get_logger().warn(
+                    'No normalizer safetensors found in model dir; '
+                    'cannot clamp zero-std dims.'
+                )
+                return
+            normalizer_stats = load_file(str(candidates[0]))
+
+            mean_t = normalizer_stats.get('observation.state.mean')
+            std_t = normalizer_stats.get('observation.state.std')
+            names = self.dataset.features['observation.state'].get('names', [])
+            if mean_t is None or std_t is None or not names:
+                self.get_logger().warn(
+                    'Model normalizer lacks observation.state mean/std or names; '
+                    'cannot clamp zero-std dims.'
+                )
+                return
+            std = np.asarray(std_t).flatten()
+            mean = np.asarray(mean_t).flatten()
+            threshold = float(self.get_parameter('zero_std_threshold').value)
+            for i, name in enumerate(names):
+                if i < len(std) and float(std[i]) < threshold:
+                    self.zero_std_overrides[name] = float(mean[i])
+            if self.zero_std_overrides:
+                self.get_logger().warn(
+                    f'Near-zero-std state dims detected in model normalizer '
+                    f'({candidates[0].name}, threshold={threshold:g}); fixing '
+                    f'live values to training mean to protect the normalizer: '
+                    f'{self.zero_std_overrides}'
+                )
+            else:
+                self.get_logger().info(
+                    'No zero-std state dims detected in model normalizer.'
+                )
+        except Exception as e:
+            self.get_logger().warn(f'Failed to compute zero-std overrides: {e}')
     
     def _apply_chunking_overrides(self, policy_cfg):
         """Override action chunking parameters at inference time.
@@ -650,6 +737,14 @@ class LeKiwiPolicyNode(Node):
             obs['x.vel'] = 0.0
             obs['y.vel'] = 0.0
             obs['theta.vel'] = 0.0
+        
+        # Fix zero-std state dims (e.g. constant gripper during data collection)
+        # to their training mean. Without this, the MEAN_STD normalizer divides a
+        # nonzero live deviation by ~eps and explodes that input (observed z-score
+        # ~1.5e5 for arm_gripper.pos), corrupting the policy's state embedding.
+        for key, mean_val in self.zero_std_overrides.items():
+            if key in obs:
+                obs[key] = mean_val
         
         # Add camera images - use simple keys without 'observation.images.' prefix
         # build_dataset_frame() will add the prefix automatically
