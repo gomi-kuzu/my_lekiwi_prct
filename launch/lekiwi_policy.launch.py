@@ -60,7 +60,10 @@ def generate_launch_description():
     dataset_root_arg = DeclareLaunchArgument(
         'dataset_root',
         default_value=str(Path.home() / 'lerobot_datasets'),
-        description='Root directory where dataset is stored'
+        description='Parent directory that contains the dataset at '
+                    '{dataset_root}/{dataset_repo_id}. The node also falls back '
+                    'to loading {dataset_root} directly if it is itself a '
+                    'dataset (with a warning).'
     )
     
     single_task_arg = DeclareLaunchArgument(

@@ -90,9 +90,24 @@ ros2 service call /lekiwi/policy/start std_srvs/srv/Trigger
   - 例: `~/outputs/train/2025-01-15/14-30-00/checkpoints/last`
 - `dataset_repo_id`: 学習に使用したデータセットのリポジトリID
   - 例: `gomi-kuzu/lekiwi_pick_place`
+  - 正規化統計などのメタデータ取得に使用します。
+
+> **重要（データセットのパス解決）**: データセットは `{dataset_root}/{dataset_repo_id}`
+> の場所から読み込まれます（HuggingFace標準レイアウト）。
+> 例えば `dataset_root:=/home/inoma/jazzy_ws/output` かつ
+> `dataset_repo_id:=gomi-kuzu/lekiwi_dance_and_bow` の場合、
+> `/home/inoma/jazzy_ws/output/gomi-kuzu/lekiwi_dance_and_bow` が読み込まれます。
+>
+> - 上記が見つからない場合、`dataset_root` 自体をデータセットとして読み込みます（警告を表示）。
+> - どちらにも `meta/info.json` が無い場合は、無関係なデータセットを黙って読み込まず、
+>   明確なエラーで停止します。
+> - 起動ログに実際に読み込んだ**絶対パスとフレーム数**が出力されるので、
+>   意図したデータセットか必ず確認してください。
 
 #### オプションパラメータ
 
+- `dataset_root`: データセットの親ディレクトリ（デフォルト: `~/lerobot_datasets`）
+  - 実際のデータセットは `{dataset_root}/{dataset_repo_id}` から読み込まれます。
 - `control_frequency`: 制御ループの周波数（デフォルト: `30.0` Hz)
 - `device`: 推論デバイス（デフォルト: `cuda`、他に `cpu`, `mps`）
 - `use_amp`: 自動混合精度を使用（デフォルト: `false`）
@@ -103,6 +118,17 @@ ros2 service call /lekiwi/policy/start std_srvs/srv/Trigger
 - `temporal_ensemble_coeff`: ACTのTemporal Ensemblingを有効化（デフォルト: `-1.0` = 学習時の値を使用）
   - `0` 以上を指定すると有効化（原論文の推奨値は `0.01`）。**再学習は不要**。
   - 有効化すると `n_action_steps` は自動的に `1` に強制される（LeRobotの制約）。
+- `clamp_zero_std_state`: 学習時に分散がほぼ0だった観測次元を学習平均に固定（デフォルト: `true`）
+  - データ収集中ずっと一定だった次元（例: 動かさなかったグリッパー）は、学習統計の
+    標準偏差が極小（例: `~4e-7`）になります。この次元に実機のわずかなズレが入ると、
+    MEAN_STD正規化で `(値 - 平均) / 極小std` が巨大化し、推論が破綻します。
+  - 本機能は該当次元を学習平均に固定することでこれを防ぎます。多様な値をとる次元
+    （std が閾値以上）はそのまま通常どおり推論されるため、副作用はありません。
+  - 無効化するには `clamp_zero_std_state:=false` を指定します。
+- `zero_std_threshold`: 上記で「分散がほぼ0」とみなす標準偏差のしきい値（デフォルト: `1e-4`）
+  - 正規化器は一定信号でも厳密な0ではなく極小のstdを保存するため、`== 0` ではなく
+    しきい値で判定します。実際に変動する最小次元のstd（例: 台車速度 ~0.02）より
+    十分小さい値に設定してください。
 
 > **補足**: 学習済みモデルは `n_action_steps=100`, `chunk_size=100`, `temporal_ensemble_coeff=null`
 > の場合、1回の推論で得た100ステップを約3.3秒（30Hz時）かけてオープンループ実行してから

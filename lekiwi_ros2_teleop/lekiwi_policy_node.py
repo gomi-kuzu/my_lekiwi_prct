@@ -304,15 +304,58 @@ class LeKiwiPolicyNode(Node):
         self.observation_ready = True
     
     def _load_dataset(self):
-        """Load the dataset to get metadata and features."""
-        self.get_logger().info(f'Loading dataset: {self.dataset_repo_id}')
-        
+        """Load the dataset to get metadata and features.
+
+        LeRobot's ``LeRobotDataset(repo_id, root=...)`` reads ``root`` DIRECTLY
+        as the dataset directory and ignores ``repo_id`` for path resolution.
+        The HuggingFace on-disk convention, however, stores a dataset at
+        ``{root}/{repo_id}``. Passing only ``root`` (as before) therefore risks
+        silently loading whatever unrelated dataset happens to sit at ``root``
+        instead of the intended ``repo_id`` -- a dangerous, hard-to-spot bug.
+
+        To make the intent explicit, resolve the path ourselves:
+          1. Prefer ``{dataset_root}/{repo_id}`` (standard HF layout).
+          2. Fall back to ``{dataset_root}`` itself (legacy direct-root layout),
+             with a warning.
+          3. If neither has ``meta/info.json``, raise a clear error instead of
+             loading an unexpected dataset.
+        """
+        repo_id = self.dataset_repo_id
+        root = self.dataset_root
+
+        nested = root / repo_id
+        if (nested / 'meta' / 'info.json').is_file():
+            resolved_root = nested
+        elif (root / 'meta' / 'info.json').is_file():
+            resolved_root = root
+            self.get_logger().warn(
+                f"dataset_root ('{root}') is itself a dataset; loading it "
+                f"directly. repo_id ('{repo_id}') is NOT used for path "
+                "resolution. If this is not intended, pass the PARENT directory "
+                "as dataset_root so that '{dataset_root}/{repo_id}' resolves."
+            )
+        else:
+            raise FileNotFoundError(
+                f"Could not find a LeRobot dataset for repo_id '{repo_id}'. "
+                f"Looked for 'meta/info.json' under:\n"
+                f"  1. {nested}\n"
+                f"  2. {root}\n"
+                "Pass the correct 'dataset_root' (the parent directory that "
+                "contains '{repo_id}') and check 'dataset_repo_id' for typos."
+            )
+
+        self.get_logger().info(
+            f'Loading dataset: {repo_id} from {resolved_root}'
+        )
+
         try:
             self.dataset = LeRobotDataset(
-                self.dataset_repo_id,
-                root=str(self.dataset_root),
+                repo_id,
+                root=str(resolved_root),
             )
-            self.get_logger().info(f'Dataset loaded: {len(self.dataset)} frames')
+            self.get_logger().info(
+                f'Dataset loaded: {len(self.dataset)} frames (root={self.dataset.root})'
+            )
             
             # Log expected feature names for debugging
             if 'observation.state' in self.dataset.features:
