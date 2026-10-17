@@ -54,6 +54,12 @@ def generate_launch_description():
         'robot_type', default_value='lekiwi_client',
         description='Robot type string stored in meta.')
 
+    use_degrees_arg = DeclareLaunchArgument(
+        'use_degrees', default_value='false',
+        description='LeKiwi arm use_degrees. Must match the robot config; '
+                    'controls arm joint units in the recorded signal spec '
+                    '(degrees vs normalized [-100, 100]).')
+
     storage_id_arg = DeclareLaunchArgument(
         'storage_id', default_value='mcap',
         description='rosbag2 storage plugin id.')
@@ -87,6 +93,7 @@ def generate_launch_description():
             'leader_arm_port': LaunchConfiguration('leader_arm_port'),
             'control_frequency': LaunchConfiguration('control_frequency'),
             'use_keyboard': LaunchConfiguration('use_keyboard'),
+            'use_degrees': LaunchConfiguration('use_degrees'),
         }],
         condition=IfCondition(LaunchConfiguration('launch_teleop')),
     )
@@ -102,6 +109,7 @@ def generate_launch_description():
             'single_task': LaunchConfiguration('single_task'),
             'robot_type': LaunchConfiguration('robot_type'),
             'target_fps': LaunchConfiguration('target_fps'),
+            'use_degrees': LaunchConfiguration('use_degrees'),
             'storage_id': LaunchConfiguration('storage_id'),
             'operator': LaunchConfiguration('operator'),
             'location': LaunchConfiguration('location'),
@@ -126,6 +134,7 @@ def generate_launch_description():
         single_task_arg,
         target_fps_arg,
         robot_type_arg,
+        use_degrees_arg,
         storage_id_arg,
         operator_arg,
         location_arg,

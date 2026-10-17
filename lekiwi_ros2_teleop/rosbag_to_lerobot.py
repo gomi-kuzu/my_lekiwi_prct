@@ -1049,13 +1049,20 @@ def _write_conversion_provenance(dataset_path: Path,
     session_meta = _load_session_meta(session_dir)
     session_software = _load_session_software(session_dir)
 
+    # Prefer the signal spec actually recorded in session.yaml (it reflects the
+    # record-time use_degrees); fall back to rebuilding only if it is missing.
+    recorded_spec = session_meta.get("signal_spec")
+    signal_spec = recorded_spec or build_signal_spec()
+    spec_version = (recorded_spec or {}).get(
+        "spec_version", SIGNAL_SPEC_VERSION)
+
     conversion = {
         "generated_at": datetime.now(timezone.utc).isoformat(
             timespec="seconds"),
         "params": params,
         "totals": totals,
-        "signal_spec_version": SIGNAL_SPEC_VERSION,
-        "signal_spec": build_signal_spec(),
+        "signal_spec_version": spec_version,
+        "signal_spec": signal_spec,
         "conversion_software": software_snapshot(),
         "conversion_git_package": package_git_info(),
         "conversion_git_workspace": workspace_git_info(),
@@ -1117,10 +1124,17 @@ def _inject_x_lekiwi_into_info_json(dataset_path: Path,
     pkg_git = session_software.get("git_package") or {}
     convert_git = package_git_info()
 
+    # Prefer the signal spec recorded in session.yaml (reflects record-time
+    # use_degrees); rebuild only as a fallback.
+    recorded_spec = session_meta.get("signal_spec")
+    signal_spec = recorded_spec or build_signal_spec()
+    spec_version = (recorded_spec or {}).get(
+        "spec_version", SIGNAL_SPEC_VERSION)
+
     x = {
         "schema_version": "1.0.0",
-        "signal_spec_version": SIGNAL_SPEC_VERSION,
-        "signal_spec": build_signal_spec(),
+        "signal_spec_version": spec_version,
+        "signal_spec": signal_spec,
         "source_session": {
             "session_uuid": session_meta.get("session_uuid"),
             "session_name": session_meta.get("session_name"),

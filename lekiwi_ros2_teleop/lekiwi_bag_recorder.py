@@ -66,6 +66,10 @@ class LeKiwiBagRecorder(Node):
         self.declare_parameter("robot_type", "lekiwi_client")
         self.declare_parameter("target_fps", 30)
         self.declare_parameter("topics", DEFAULT_TOPICS)
+        # Must match the LeKiwi robot's use_degrees at record time. Controls
+        # arm body-joint units in the signal spec (degrees vs normalized
+        # [-100, 100]). The teleop node defaults to False.
+        self.declare_parameter("use_degrees", False)
         # MCAP storage plugin id ("mcap"). Requires rosbag2_storage_mcap.
         self.declare_parameter("storage_id", "mcap")
         # Optional extra args passed verbatim to `ros2 bag record`.
@@ -86,6 +90,8 @@ class LeKiwiBagRecorder(Node):
         self.single_task: str = self.get_parameter("single_task").value
         self.robot_type: str = self.get_parameter("robot_type").value
         self.target_fps: int = int(self.get_parameter("target_fps").value)
+        self.use_degrees: bool = bool(
+            self.get_parameter("use_degrees").value)
         self.topics: List[str] = list(self.get_parameter("topics").value)
         self.storage_id: str = self.get_parameter("storage_id").value
         self.extra_record_args: List[str] = [
@@ -176,7 +182,7 @@ class LeKiwiBagRecorder(Node):
             "location": location,
             "note": note,
             "hardware": hardware,
-            "signal_spec": build_signal_spec(),
+            "signal_spec": build_signal_spec(self.use_degrees),
         }
         with session_yaml_path.open("w") as f:
             yaml.safe_dump(session_meta, f, sort_keys=False,
