@@ -4,10 +4,13 @@
 
 ## ファイル構成
 
-- `lekiwi_data_recorder.py`: データ収集用ROS2ノード
+- `lekiwi_data_recorder.py`: データ収集用ROS2ノード（オンライン直接LeRobot v3書き出し）
+- `lekiwi_bag_recorder.py`: **推奨** MCAP rosbag でエピソード単位に記録するノード
+- `rosbag_to_lerobot.py`: MCAP → LeRobot v3 のオフライン変換 & 同期分析ツール
 - `lekiwi_ros2_teleop_client.py`: テレオペレーション用ROS2クライアント
 - `upload_dataset.py`: データセットをHugging Face Hubにアップロードするスクリプト
-- `launch/lekiwi_record.launch.py`: データ記録用launchファイル
+- `launch/lekiwi_record.launch.py`: データ記録用launchファイル（直接LeRobot方式）
+- `launch/lekiwi_bag_record.launch.py`: MCAP方式のlaunchファイル
 
 ## セットアップ
 
@@ -26,7 +29,129 @@ source install/setup.bash
 
 ## 使用方法
 
-### 推奨ワークフロー: テレオペノードとデータレコーダーを別々に起動
+## 推奨: MCAP rosbag 記録 → オフラインで LeRobot v3 に変換
+
+直接LeRobot形式で書き込む代わりに、まず MCAP rosbag として raw データを保存し、
+後段のオフラインスクリプトで同期チェック・フォーマッティングを行うワークフロー。
+
+**メリット**
+- リアルタイム側は動画エンコード等を行わないので取りこぼしが起きにくい
+- 時刻同期・特徴量定義・画像リサイズを後から何度でも調整できる
+- `header.stamp` に基づく厳密な最近傍/補間ペアリングが可能
+- 同期ズレの分布を可視化してから許容幅を決められる
+
+### 前提: MCAP ストレージプラグイン
+
+```bash
+sudo apt install ros-jazzy-rosbag2-storage-mcap
+```
+
+### ステップ1: テレオペレーションノードを起動
+
+上の「推奨ワークフロー」と同じ。
+
+### ステップ2: bag レコーダーを起動
+
+```bash
+source install/setup.bash
+ros2 launch lekiwi_ros2_teleop lekiwi_bag_record.launch.py \
+    launch_teleop:=false \
+    output_root:=$HOME/lekiwi_bags \
+    single_task:="Pick and place the bottle cap" \
+    target_fps:=30
+```
+
+- `output_root` 配下に `session_YYYYmmdd_HHMMSS/` が作られる。
+- `session_name` を指定すれば任意名。既存セッションを指定するとエピソードが追加される。
+
+### ステップ3: エピソードの記録
+
+```bash
+ros2 service call /lekiwi_bag_recorder/start_episode std_srvs/srv/Trigger
+# ... テレオペ操作 ...
+ros2 service call /lekiwi_bag_recorder/stop_episode  std_srvs/srv/Trigger
+```
+
+各エピソードは `session_.../episode_000000/bag/` に MCAP として保存され、
+`episode.yaml` に `single_task` などのメタが記録される。
+
+### ステップ4: 同期分析（変換前に必ず実行推奨）
+
+各エピソードで、`header.stamp` を使った最近傍ペアリング時のズレを集計し、
+「許容幅ごとの棄却率」を表示する。
+
+```bash
+python3 src/lekiwi_ros2_teleop/lekiwi_ros2_teleop/rosbag_to_lerobot.py \
+    --session-dir $HOME/lekiwi_bags/session_20260923_120000 \
+    --mode analyze \
+    --action-lag-ms 0
+```
+
+出力例:
+
+```
+--- Drop rate vs. --sync-tolerance-ms ---
+  tol_ms |     kept |  dropped |   drop%
+--------------------------------------------
+    5.0 |     1234 |      560 |  31.20%
+   10.0 |     1650 |      144 |   8.03%
+   20.0 |     1780 |       14 |   0.78%
+   30.0 |     1794 |        0 |   0.00%
+...
+--- Per-frame max-gap distribution (ms) ---
+  p50=6.42  p90=14.85  p95=17.20  p99=25.10  max=38.4
+```
+
+この結果を見ながら、後段の `--sync-tolerance-ms` を決める。
+
+### ステップ5: LeRobot v3 データセットに変換
+
+```bash
+python3 src/lekiwi_ros2_teleop/lekiwi_ros2_teleop/rosbag_to_lerobot.py \
+    --session-dir $HOME/lekiwi_bags/session_20260923_120000 \
+    --mode convert \
+    --dataset-repo-id john/lekiwi_pick_place \
+    --dataset-root $HOME/lerobot_datasets \
+    --fps 30 \
+    --sync-tolerance-ms 20 \
+    --action-lag-ms 0
+```
+
+または colcon build 後は entry point で:
+
+```bash
+lekiwi_rosbag_to_lerobot --session-dir ... --mode convert --dataset-repo-id ...
+```
+
+### 同期・ペアリングのパラメータ
+
+| パラメータ | 意味 | デフォルト | 推奨 |
+|---|---|---|---|
+| `--sync-base-topic` | 時刻同期の基準トピック | 未指定なら observation 系で最も低周波なものを自動選択 | カメラのどちらか（30Hz） |
+| `--sync-tolerance-ms` | 基準stampから他トピック最近傍までの最大許容ズレ [ms]。超えたフレームは棄却 | `20.0` | `analyze` の p95 付近を目安。30Hz なら 15〜25ms |
+| `--action-lag-ms` | action 側のstampに加算するオフセット [ms]。`observation_ts + lag` に最も近い action を採用 | `0.0` | 0 が無難。テレオペのループ遅延を打ち消したいときは `+1/fps` (30Hz なら `+33`) を試す |
+| `--tolerance-sweep-ms` | analyze モードで表示するズレ許容幅の一覧 | `5 10 15 20 25 30 40 50 75 100` | 用途に応じて変更 |
+
+**`--action-lag-ms` の推奨デフォルト** について:
+- 一般的な imitation learning では「観測 obs_t と、その時刻にオペレータが出していた
+  指令 action_t を対で学ぶ」ため `0` が自然です。
+- 実機では leader arm 読み取り → 送信 → 受信 → 記録の間に遅延が入るので、
+  `analyze` を最小許容幅で走らせて action 系のズレが片側に偏っているようなら、
+  片側偏りが最小になる方向へ `+15〜+33ms` 程度で試すと良いです。
+
+### 既存 LeRobot データセットへの追記
+
+```bash
+python3 src/lekiwi_ros2_teleop/lekiwi_ros2_teleop/rosbag_to_lerobot.py \
+    --session-dir $HOME/lekiwi_bags/session_20260923_120000 \
+    --mode convert \
+    --dataset-repo-id john/lekiwi_pick_place \
+    --resume
+```
+
+---
+
+## 使用方法（旧: 直接 LeRobot 書き込み方式）
 
 #### ステップ1: テレオペレーションノードを起動
 

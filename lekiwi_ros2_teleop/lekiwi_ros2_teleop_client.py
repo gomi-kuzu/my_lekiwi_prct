@@ -49,7 +49,7 @@ if lerobot_path not in sys.path:
 
 from lerobot.robots.lekiwi import LeKiwiClient, LeKiwiClientConfig
 from lerobot.teleoperators.keyboard.teleop_keyboard import KeyboardTeleop, KeyboardTeleopConfig
-from lerobot.teleoperators.so100_leader import SO100Leader, SO100LeaderConfig
+from lerobot.teleoperators.so_leader import SO100Leader, SO100LeaderConfig
 
 
 class LeKiwiROS2TeleopClient(Node):

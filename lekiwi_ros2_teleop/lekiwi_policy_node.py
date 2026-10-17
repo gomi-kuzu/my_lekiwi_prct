@@ -86,10 +86,10 @@ from lerobot.policies.factory import make_policy, make_pre_post_processors
 from lerobot.policies.utils import make_robot_action
 from lerobot.processor import PolicyProcessorPipeline, RobotAction, RobotObservation
 from lerobot.processor.rename_processor import rename_stats
-from lerobot.datasets.utils import build_dataset_frame
+from lerobot.utils.feature_utils import build_dataset_frame
 from lerobot.utils.constants import ACTION, OBS_STR
-from lerobot.utils.utils import get_safe_torch_device
-from lerobot.utils.control_utils import predict_action
+from lerobot.utils.device_utils import get_safe_torch_device
+from lerobot.common.control_utils import predict_action
 
 
 class LeKiwiPolicyNode(Node):
@@ -126,6 +126,31 @@ class LeKiwiPolicyNode(Node):
         self.declare_parameter('device', 'cuda')
         self.declare_parameter('use_amp', False)
         self.declare_parameter('rename_map', '')
+        # Inference-time action chunking overrides (no retraining required).
+        # n_action_steps: number of actions consumed per policy inference.
+        #   0 (default) keeps the trained model's value. Smaller -> re-infer more
+        #   often with fresh observations (more reactive / closer to closed-loop).
+        #   Must satisfy 1 <= n_action_steps <= chunk_size.
+        self.declare_parameter('n_action_steps', 0)
+        # temporal_ensemble_coeff: enable ACT temporal ensembling when >= 0.
+        #   Negative (default) keeps the trained model's value (usually disabled).
+        #   When enabled, n_action_steps is forced to 1 (LeRobot constraint).
+        self.declare_parameter('temporal_ensemble_coeff', -1.0)
+        # clamp_zero_std_state: when True (default), any observation.state
+        #   dimension whose training std is ~0 (constant during data collection)
+        #   is forced to its training mean before inference. This avoids the
+        #   MEAN_STD normalizer dividing a nonzero deviation by ~0, which would
+        #   otherwise explode that input to ~1e5 and corrupt the policy's state
+        #   embedding. The dimension carried no information at training time, so
+        #   fixing it to the mean loses nothing.
+        self.declare_parameter('clamp_zero_std_state', True)
+        # zero_std_threshold: a state dimension is treated as degenerate when
+        #   its training std is below this value. The normalizer stores a tiny
+        #   nonzero std (e.g. ~4e-7) for constant signals rather than exact 0,
+        #   so an exact == 0 test misses them. Any std this small still blows up
+        #   the normalized input, so clamp those dims. Must stay well below the
+        #   smallest genuinely-varying dim's std (base velocities ~0.02 here).
+        self.declare_parameter('zero_std_threshold', 1e-4)
         
         # Get parameters
         policy_path_raw = self.get_parameter('policy_path').value
@@ -166,6 +191,16 @@ class LeKiwiPolicyNode(Node):
         self.latest_front_image: Optional[np.ndarray] = None
         self.latest_wrist_image: Optional[np.ndarray] = None
         self.observation_ready = False
+
+        # Whether the loaded policy/dataset expects camera images.
+        # Auto-detected from dataset features in _load_dataset(). When the
+        # dataset has no observation.images.* features (image-free policy),
+        # the node runs inference without waiting for camera topics.
+        self.require_front_image = True
+        self.require_wrist_image = True
+        # Feature set used to build observation frames. Populated in
+        # _configure_image_requirements() after the policy is loaded.
+        self.observation_features = None
         
         # QoS settings
         qos_profile = QoSProfile(
@@ -206,13 +241,21 @@ class LeKiwiPolicyNode(Node):
         # Initialize components
         self.get_logger().info('Initializing policy node...')
         self._load_dataset()
+        self._compute_zero_std_overrides()
         self._load_policy()
         
         self.get_logger().info('LeKiwi Policy Node initialized successfully!')
         self.get_logger().info(f'Policy path: {self.policy_path}')
         self.get_logger().info(f'Dataset: {self.dataset_repo_id}')
         self.get_logger().info(f'Task: {self.single_task}')
-        self.get_logger().info('Waiting for observations from /lekiwi/joint_states and camera topics...')
+        if self.require_front_image or self.require_wrist_image:
+            self.get_logger().info(
+                'Waiting for observations from /lekiwi/joint_states and camera topics...'
+            )
+        else:
+            self.get_logger().info(
+                'Waiting for observations from /lekiwi/joint_states (image-free, no cameras required)...'
+            )
     
     def joint_state_callback(self, msg: JointState):
         """Callback for receiving joint states from the robot."""
@@ -244,34 +287,223 @@ class LeKiwiPolicyNode(Node):
             self.get_logger().warn(f'Failed to decode wrist camera image: {e}')
     
     def _check_observation_ready(self):
-        """Check if all observation data is available."""
-        if (self.latest_joint_state is not None and 
-            self.latest_front_image is not None and 
-            self.latest_wrist_image is not None):
-            if not self.observation_ready:
-                self.get_logger().info('All observations received. Ready for inference.')
-            self.observation_ready = True
+        """Check if all observation data is available.
+
+        Camera images are only required when the loaded policy/dataset
+        actually expects them (auto-detected in _load_dataset()). This allows
+        image-free policies to run using only joint states.
+        """
+        if self.latest_joint_state is None:
+            return
+        if self.require_front_image and self.latest_front_image is None:
+            return
+        if self.require_wrist_image and self.latest_wrist_image is None:
+            return
+        if not self.observation_ready:
+            self.get_logger().info('All observations received. Ready for inference.')
+        self.observation_ready = True
     
     def _load_dataset(self):
-        """Load the dataset to get metadata and features."""
-        self.get_logger().info(f'Loading dataset: {self.dataset_repo_id}')
-        
+        """Load the dataset to get metadata and features.
+
+        LeRobot's ``LeRobotDataset(repo_id, root=...)`` reads ``root`` DIRECTLY
+        as the dataset directory and ignores ``repo_id`` for path resolution.
+        The HuggingFace on-disk convention, however, stores a dataset at
+        ``{root}/{repo_id}``. Passing only ``root`` (as before) therefore risks
+        silently loading whatever unrelated dataset happens to sit at ``root``
+        instead of the intended ``repo_id`` -- a dangerous, hard-to-spot bug.
+
+        To make the intent explicit, resolve the path ourselves:
+          1. Prefer ``{dataset_root}/{repo_id}`` (standard HF layout).
+          2. Fall back to ``{dataset_root}`` itself (legacy direct-root layout),
+             with a warning.
+          3. If neither has ``meta/info.json``, raise a clear error instead of
+             loading an unexpected dataset.
+        """
+        repo_id = self.dataset_repo_id
+        root = self.dataset_root
+
+        nested = root / repo_id
+        if (nested / 'meta' / 'info.json').is_file():
+            resolved_root = nested
+        elif (root / 'meta' / 'info.json').is_file():
+            resolved_root = root
+            self.get_logger().warn(
+                f"dataset_root ('{root}') is itself a dataset; loading it "
+                f"directly. repo_id ('{repo_id}') is NOT used for path "
+                "resolution. If this is not intended, pass the PARENT directory "
+                "as dataset_root so that '{dataset_root}/{repo_id}' resolves."
+            )
+        else:
+            raise FileNotFoundError(
+                f"Could not find a LeRobot dataset for repo_id '{repo_id}'. "
+                f"Looked for 'meta/info.json' under:\n"
+                f"  1. {nested}\n"
+                f"  2. {root}\n"
+                "Pass the correct 'dataset_root' (the parent directory that "
+                "contains '{repo_id}') and check 'dataset_repo_id' for typos."
+            )
+
+        self.get_logger().info(
+            f'Loading dataset: {repo_id} from {resolved_root}'
+        )
+
         try:
             self.dataset = LeRobotDataset(
-                self.dataset_repo_id,
-                root=str(self.dataset_root),
+                repo_id,
+                root=str(resolved_root),
             )
-            self.get_logger().info(f'Dataset loaded: {len(self.dataset)} frames')
+            self.get_logger().info(
+                f'Dataset loaded: {len(self.dataset)} frames (root={self.dataset.root})'
+            )
             
             # Log expected feature names for debugging
             if 'observation.state' in self.dataset.features:
                 state_names = self.dataset.features['observation.state'].get('names', [])
                 self.get_logger().info(f'Expected observation.state names: {state_names}')
+
+            # Log image features present in the dataset (informational only).
+            # Whether the node actually waits for these cameras is decided by
+            # the policy config in _configure_image_requirements().
+            image_features = {
+                k for k in self.dataset.features if k.startswith('observation.images.')
+            }
+            if image_features:
+                self.get_logger().info(
+                    f'Dataset image features: {sorted(image_features)}'
+                )
             
         except Exception as e:
             self.get_logger().error(f'Failed to load dataset: {e}')
             raise
     
+    def _compute_zero_std_overrides(self):
+        """Detect observation.state dims with zero training std and fix them.
+
+        When ``clamp_zero_std_state`` is enabled, build a mapping from the
+        observation key (e.g. ``arm_gripper.pos``) to its training mean for
+        every state dimension whose training std is below ``zero_std_threshold``.
+        Constant signals are stored with a tiny nonzero std (e.g. ~4e-7) rather
+        than exactly 0, so a threshold is used instead of ``== 0``. Such
+        dimensions were constant during data collection, so the MEAN_STD
+        normalizer would divide any nonzero live deviation by ~0 and blow the
+        input up. Fixing the live value to the training mean yields a normalized
+        value of ~0, matching what the policy saw during training.
+
+        IMPORTANT: For a pretrained ACT policy, inference normalization uses the
+        statistics SAVED INSIDE THE MODEL (``*normalizer_processor.safetensors``),
+        NOT the dataset's ``stats.json`` (the passed ``dataset_stats`` is ignored
+        by LeRobot when loading pretrained processors). We therefore read the
+        model's own normalizer stats so detection matches the actual normalizer,
+        regardless of which dataset is passed at launch.
+        """
+        self.zero_std_overrides: Dict[str, float] = {}
+        if not self.get_parameter('clamp_zero_std_state').value:
+            self.get_logger().info('clamp_zero_std_state disabled; skipping.')
+            return
+        try:
+            from safetensors.torch import load_file
+
+            # Locate the preprocessor normalizer stats saved inside the model.
+            model_dir = Path(self.policy_path)
+            candidates = sorted(model_dir.glob('*normalizer_processor.safetensors'))
+            # Exclude the postprocessor (un)normalizer; keep the input normalizer.
+            candidates = [
+                p for p in candidates if 'unnormalizer' not in p.name
+            ]
+            if not candidates:
+                self.get_logger().warn(
+                    'No normalizer safetensors found in model dir; '
+                    'cannot clamp zero-std dims.'
+                )
+                return
+            normalizer_stats = load_file(str(candidates[0]))
+
+            mean_t = normalizer_stats.get('observation.state.mean')
+            std_t = normalizer_stats.get('observation.state.std')
+            names = self.dataset.features['observation.state'].get('names', [])
+            if mean_t is None or std_t is None or not names:
+                self.get_logger().warn(
+                    'Model normalizer lacks observation.state mean/std or names; '
+                    'cannot clamp zero-std dims.'
+                )
+                return
+            std = np.asarray(std_t).flatten()
+            mean = np.asarray(mean_t).flatten()
+            threshold = float(self.get_parameter('zero_std_threshold').value)
+            for i, name in enumerate(names):
+                if i < len(std) and float(std[i]) < threshold:
+                    self.zero_std_overrides[name] = float(mean[i])
+            if self.zero_std_overrides:
+                self.get_logger().warn(
+                    f'Near-zero-std state dims detected in model normalizer '
+                    f'({candidates[0].name}, threshold={threshold:g}); fixing '
+                    f'live values to training mean to protect the normalizer: '
+                    f'{self.zero_std_overrides}'
+                )
+            else:
+                self.get_logger().info(
+                    'No zero-std state dims detected in model normalizer.'
+                )
+        except Exception as e:
+            self.get_logger().warn(f'Failed to compute zero-std overrides: {e}')
+    
+    def _apply_chunking_overrides(self, policy_cfg):
+        """Override action chunking parameters at inference time.
+
+        Both ``n_action_steps`` and ``temporal_ensemble_coeff`` are inference-time
+        settings for ACT-style policies, so changing them does NOT require
+        retraining. They must be applied before ``make_policy`` builds the model.
+
+        Constraints enforced by LeRobot's ACTConfig:
+            - 1 <= n_action_steps <= chunk_size
+            - n_action_steps must be 1 when temporal ensembling is enabled
+        """
+        chunk_size = getattr(policy_cfg, 'chunk_size', None)
+
+        # Temporal ensembling: enabled when coeff >= 0.
+        te_coeff = self.get_parameter('temporal_ensemble_coeff').value
+        if te_coeff is not None and te_coeff >= 0.0:
+            if not hasattr(policy_cfg, 'temporal_ensemble_coeff'):
+                self.get_logger().warn(
+                    'Policy config has no temporal_ensemble_coeff; ignoring override.'
+                )
+            else:
+                policy_cfg.temporal_ensemble_coeff = float(te_coeff)
+                # LeRobot requires n_action_steps == 1 with temporal ensembling.
+                policy_cfg.n_action_steps = 1
+                self.get_logger().info(
+                    f'Temporal ensembling enabled (coeff={te_coeff}); '
+                    'n_action_steps forced to 1.'
+                )
+                return
+
+        # n_action_steps override: 0 keeps the trained model's value.
+        n_action_steps = self.get_parameter('n_action_steps').value
+        if n_action_steps and n_action_steps > 0:
+            if not hasattr(policy_cfg, 'n_action_steps'):
+                self.get_logger().warn(
+                    'Policy config has no n_action_steps; ignoring override.'
+                )
+            elif chunk_size is not None and n_action_steps > chunk_size:
+                self.get_logger().warn(
+                    f'n_action_steps={n_action_steps} exceeds chunk_size={chunk_size}; '
+                    f'clamping to {chunk_size}.'
+                )
+                policy_cfg.n_action_steps = chunk_size
+            else:
+                policy_cfg.n_action_steps = int(n_action_steps)
+                self.get_logger().info(
+                    f'n_action_steps overridden to {policy_cfg.n_action_steps} '
+                    f'(chunk_size={chunk_size}).'
+                )
+        else:
+            self.get_logger().info(
+                f'Using trained n_action_steps='
+                f'{getattr(policy_cfg, "n_action_steps", "?")} '
+                f'(chunk_size={chunk_size}).'
+            )
+
     def _load_policy(self):
         """Load the pretrained policy and processors."""
         self.get_logger().info(f'Loading policy from: {self.policy_path}')
@@ -311,6 +543,9 @@ class LeKiwiPolicyNode(Node):
             policy_cfg.device = self.get_parameter('device').value
             policy_cfg.use_amp = self.get_parameter('use_amp').value
             
+            # Override action chunking behavior at inference time (no retraining).
+            self._apply_chunking_overrides(policy_cfg)
+            
             # Apply rename_map to dataset metadata if provided
             if self.rename_map:
                 original_features = self.dataset.meta.info["features"]
@@ -323,6 +558,12 @@ class LeKiwiPolicyNode(Node):
             
             # Create policy
             self.policy = make_policy(policy_cfg, ds_meta=self.dataset.meta, rename_map=self.rename_map)
+
+            # Determine which camera images the POLICY actually consumes.
+            # The dataset may contain image features even when the trained
+            # policy ignores them (image-free policy). Use the policy config's
+            # image_features so we only wait for cameras the model needs.
+            self._configure_image_requirements(policy_cfg)
             
             # Build preprocessor overrides
             preprocessor_overrides = {
@@ -349,7 +590,53 @@ class LeKiwiPolicyNode(Node):
         except Exception as e:
             self.get_logger().error(f'Failed to load policy: {e}')
             raise
-    
+
+    def _configure_image_requirements(self, policy_cfg):
+        """Decide which camera images are required based on the policy config.
+
+        A policy trained without images (image-free) has no visual entries in
+        its ``image_features``/``input_features``, so the node should not wait
+        for camera topics even if the dataset still contains image features.
+        """
+        # policy_cfg.image_features is a list of input feature keys with
+        # visual type (e.g. 'observation.images.front'). Fall back to scanning
+        # input_features if the property is unavailable.
+        image_feature_keys = getattr(policy_cfg, 'image_features', None)
+        if image_feature_keys is None:
+            input_features = getattr(policy_cfg, 'input_features', {}) or {}
+            image_feature_keys = [
+                k for k in input_features if 'image' in k.lower()
+            ]
+        image_feature_keys = set(image_feature_keys)
+
+        # Resolve rename_map so short keys (e.g. camera1) are matched.
+        front_feature = 'observation.images.front'
+        wrist_feature = 'observation.images.wrist'
+        if self.rename_map:
+            front_feature = self.rename_map.get(front_feature, front_feature)
+            wrist_feature = self.rename_map.get(wrist_feature, wrist_feature)
+
+        self.require_front_image = front_feature in image_feature_keys
+        self.require_wrist_image = wrist_feature in image_feature_keys
+
+        # Build the feature set passed to build_dataset_frame(). Dataset may
+        # contain image features the policy does not use; drop those so the
+        # frame builder does not demand missing image observations.
+        self.observation_features = {
+            k: v for k, v in self.dataset.features.items()
+            if not (k.startswith('observation.images.') and k not in image_feature_keys)
+        }
+
+        if not image_feature_keys:
+            self.get_logger().info(
+                'Policy uses no camera images; running image-free inference '
+                '(camera topics not required).'
+            )
+        else:
+            self.get_logger().info(
+                f'Policy requires image features: {sorted(image_feature_keys)}'
+            )
+
     def start_callback(self, request, response):
         """Start policy inference."""
         if self.is_running:
@@ -410,9 +697,11 @@ class LeKiwiPolicyNode(Node):
             
             self.get_logger().debug('Control loop: building observation frame...', throttle_duration_sec=1.0)
             
-            # Build observation frame for policy
+            # Build observation frame for policy. Use observation_features
+            # (image features the policy ignores are excluded) so image-free
+            # policies don't require camera observations.
             observation_frame = build_dataset_frame(
-                self.dataset.features, 
+                self.observation_features, 
                 obs, 
                 prefix=OBS_STR
             )
@@ -491,6 +780,14 @@ class LeKiwiPolicyNode(Node):
             obs['x.vel'] = 0.0
             obs['y.vel'] = 0.0
             obs['theta.vel'] = 0.0
+        
+        # Fix zero-std state dims (e.g. constant gripper during data collection)
+        # to their training mean. Without this, the MEAN_STD normalizer divides a
+        # nonzero live deviation by ~eps and explodes that input (observed z-score
+        # ~1.5e5 for arm_gripper.pos), corrupting the policy's state embedding.
+        for key, mean_val in self.zero_std_overrides.items():
+            if key in obs:
+                obs[key] = mean_val
         
         # Add camera images - use simple keys without 'observation.images.' prefix
         # build_dataset_frame() will add the prefix automatically

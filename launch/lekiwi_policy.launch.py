@@ -60,7 +60,10 @@ def generate_launch_description():
     dataset_root_arg = DeclareLaunchArgument(
         'dataset_root',
         default_value=str(Path.home() / 'lerobot_datasets'),
-        description='Root directory where dataset is stored'
+        description='Parent directory that contains the dataset at '
+                    '{dataset_root}/{dataset_repo_id}. The node also falls back '
+                    'to loading {dataset_root} directly if it is itself a '
+                    'dataset (with a warning).'
     )
     
     single_task_arg = DeclareLaunchArgument(
@@ -74,6 +77,23 @@ def generate_launch_description():
         'control_frequency',
         default_value='30.0',
         description='Control loop frequency in Hz'
+    )
+    
+    # Action chunking arguments (inference-time, no retraining required)
+    n_action_steps_arg = DeclareLaunchArgument(
+        'n_action_steps',
+        default_value='0',
+        description='Actions consumed per policy inference. 0 keeps the trained '
+                    'model value; smaller re-infers more often (more reactive). '
+                    'Must be 1 <= n_action_steps <= chunk_size.'
+    )
+    
+    temporal_ensemble_coeff_arg = DeclareLaunchArgument(
+        'temporal_ensemble_coeff',
+        default_value='-1.0',
+        description='Enable ACT temporal ensembling when >= 0 (e.g., 0.01). '
+                    'Negative keeps the trained model value. When enabled, '
+                    'n_action_steps is forced to 1.'
     )
     
     # Device arguments
@@ -125,6 +145,8 @@ def generate_launch_description():
             'dataset_repo_id': LaunchConfiguration('dataset_repo_id'),
             'dataset_root': LaunchConfiguration('dataset_root'),
             'control_frequency': LaunchConfiguration('control_frequency'),
+            'n_action_steps': ParameterValue(LaunchConfiguration('n_action_steps'), value_type=int),
+            'temporal_ensemble_coeff': ParameterValue(LaunchConfiguration('temporal_ensemble_coeff'), value_type=float),
             'single_task': LaunchConfiguration('single_task'),
             'use_degrees': LaunchConfiguration('use_degrees'),
             'rotate_front_camera': LaunchConfiguration('rotate_front_camera'),
@@ -142,6 +164,8 @@ def generate_launch_description():
         dataset_root_arg,
         single_task_arg,
         control_frequency_arg,
+        n_action_steps_arg,
+        temporal_ensemble_coeff_arg,
         device_arg,
         use_amp_arg,
         robot_port_arg,

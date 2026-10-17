@@ -32,6 +32,8 @@ setup(
             'lekiwi_vla_node = lekiwi_ros2_teleop.lekiwi_vla_node:main',
             'lekiwi_ros2_teleop_client = lekiwi_ros2_teleop.lekiwi_ros2_teleop_client:main',
             'lekiwi_data_recorder = lekiwi_ros2_teleop.lekiwi_data_recorder:main',
+            'lekiwi_bag_recorder = lekiwi_ros2_teleop.lekiwi_bag_recorder:main',
+            'lekiwi_rosbag_to_lerobot = lekiwi_ros2_teleop.rosbag_to_lerobot:main',
             'lekiwi_upload_dataset = lekiwi_ros2_teleop.upload_dataset:main',
             'lekiwi_policy_node = lekiwi_ros2_teleop.lekiwi_policy_node:main',
         ],
