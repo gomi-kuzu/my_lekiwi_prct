@@ -22,6 +22,8 @@ Based on lekiwi_host.py but using ROS2 topic communication instead of ZMQ.
 """
 
 import os
+import shutil
+import subprocess
 import sys
 import time
 from typing import Optional
@@ -78,9 +80,11 @@ class LeKiwiTeleopNode(Node):
         # This is better for identical camera models with same serial numbers
         # Note: Connect cameras to different USB ports to get different paths
         self.declare_parameter('front_camera_device', 
-            '/dev/v4l/by-path/platform-xhci-hcd.1-usb-0:2:1.0-video-index0,/dev/video0')  
+            '/dev/v4l/by-path/platform-xhci-hcd.0-usb-0:1:1.0-video-index0,/dev/video2')  
+        # NOTE: Hub port may enumerate differently depending on physical port.
+        # Update this if `ls /dev/v4l/by-path/` shows a different suffix on your system.
         self.declare_parameter('wrist_camera_device', 
-            '/dev/v4l/by-path/platform-xhci-hcd.1-usb-0:1.3:1.0-video-index0,/dev/video2')
+            '/dev/v4l/by-path/platform-xhci-hcd.1-usb-0:1.2:1.0-video-index0,/dev/video0')
         
         ##### not use usb-hub #########
         # self.declare_parameter('front_camera_device', 
@@ -93,8 +97,25 @@ class LeKiwiTeleopNode(Node):
         self.declare_parameter('camera_fps', 30)  # Camera FPS (must match hardware capability)
         self.declare_parameter('front_camera_width', 640)  # Front camera width
         self.declare_parameter('front_camera_height', 480)  # Front camera height
-        self.declare_parameter('wrist_camera_width', 480)  # Wrist camera width 
+        # NOTE: The wrist camera is physically mounted rotated 90°,
+        # so width/height are swapped compared to the front camera.
+        self.declare_parameter('wrist_camera_width', 480)  # Wrist camera width
         self.declare_parameter('wrist_camera_height', 640)  # Wrist camera height
+        # Use MJPG (compressed) to drastically reduce USB bandwidth so two cameras
+        # can run on the same USB controller/hub. Empty string = driver default (often
+        # uncompressed YUYV), which frequently causes 'read failed (status=False)'.
+        self.declare_parameter('camera_fourcc', 'MJPG')
+        # Manual exposure. These icSpring cameras default to auto_exposure=3 (Aperture
+        # Priority), which stretches exposure time in dim light and drops the effective
+        # capture rate to ~13.5fps. Forcing manual exposure with a short exposure time
+        # restores ~28-30fps. Set camera_manual_exposure=False to keep the driver default.
+        # exposure_time ~200 (20ms) keeps >=28fps; increase for brighter images (but
+        # values above ~300 start dropping below 30fps). gain compensates brightness
+        # without costing frame rate (max 63 on these cameras).
+        self.declare_parameter('camera_manual_exposure', True)
+        self.declare_parameter('camera_exposure_time', 200)  # exposure_time_absolute (100us units)
+        self.declare_parameter('camera_gain', 63)  # 0..63; higher = brighter (adds noise)
+        self.declare_parameter('camera_power_line_frequency', 0)  # 0=Disabled,1=50Hz,2=60Hz
         self.declare_parameter('enable_cameras', True)  # Allow disabling cameras for debugging
         self.declare_parameter('allow_camera_failure', True)  # Continue robot operation even if cameras fail
         
@@ -106,6 +127,11 @@ class LeKiwiTeleopNode(Node):
         self.rotate_front_camera = self.get_parameter('rotate_front_camera').value
         front_camera_device_list = self.get_parameter('front_camera_device').value.split(',')
         wrist_camera_device_list = self.get_parameter('wrist_camera_device').value.split(',')
+        camera_fourcc = self.get_parameter('camera_fourcc').value
+        self.camera_manual_exposure = self.get_parameter('camera_manual_exposure').value
+        self.camera_exposure_time = self.get_parameter('camera_exposure_time').value
+        self.camera_gain = self.get_parameter('camera_gain').value
+        self.camera_power_line_frequency = self.get_parameter('camera_power_line_frequency').value
         camera_fps = self.get_parameter('camera_fps').value
         front_camera_width = self.get_parameter('front_camera_width').value
         front_camera_height = self.get_parameter('front_camera_height').value
@@ -138,10 +164,17 @@ class LeKiwiTeleopNode(Node):
             robot_config.cameras['wrist'].width = wrist_camera_width
             robot_config.cameras['wrist'].height = wrist_camera_height
             
+            # Apply FOURCC (e.g. MJPG) to reduce USB bandwidth usage.
+            # An empty string means "leave driver default".
+            if camera_fourcc:
+                robot_config.cameras['front'].fourcc = camera_fourcc
+                robot_config.cameras['wrist'].fourcc = camera_fourcc
+            
             self.get_logger().info(f'Front camera: {front_camera_device} (fallback: {front_camera_device_list[1:]})')
             self.get_logger().info(f'  Resolution: {front_camera_width}x{front_camera_height}@{camera_fps}fps')
             self.get_logger().info(f'Wrist camera: {wrist_camera_device} (fallback: {wrist_camera_device_list[1:]})')
             self.get_logger().info(f'  Resolution: {wrist_camera_width}x{wrist_camera_height}@{camera_fps}fps, rotated 90°')
+            self.get_logger().info(f'  FOURCC: {camera_fourcc or "driver default"}')
         else:
             # Disable cameras by removing them from config
             robot_config.cameras = {}
@@ -216,6 +249,11 @@ class LeKiwiTeleopNode(Node):
         if not connected:
             self.get_logger().error(f'Failed to connect to robot: {last_error}')
             raise RuntimeError(last_error)
+        
+        # Force manual exposure so cameras run at full frame rate (auto exposure
+        # otherwise drops them to ~13.5fps in dim light).
+        if self.enable_cameras and self.camera_manual_exposure:
+            self._apply_manual_exposure()
         
         # Print camera status warning if cameras are disabled
         if not self.enable_cameras:
@@ -312,7 +350,51 @@ class LeKiwiTeleopNode(Node):
         
         self.get_logger().info(f'LeKiwi teleoperation node started at {self.control_frequency} Hz')
     
+    def _apply_manual_exposure(self):
+        """Force manual exposure on each camera via v4l2-ctl.
+
+        These cameras default to Aperture Priority auto-exposure, which lengthens the
+        exposure time in dim light and caps the effective capture rate at ~13.5fps.
+        Switching to manual mode with a short exposure time restores full frame rate.
+        """
+        v4l2 = shutil.which('v4l2-ctl')
+        if v4l2 is None:
+            self.get_logger().warn(
+                'v4l2-ctl not found; cannot set manual exposure. '
+                'Install v4l-utils to avoid auto-exposure frame-rate drops.'
+            )
+            return
+
+        cameras = getattr(self.robot, 'cameras', {}) or {}
+        for cam_name, cam in cameras.items():
+            device = getattr(cam, 'index_or_path', None)
+            if device is None:
+                continue
+            device = str(device)
+            controls = [
+                'auto_exposure=1',  # 1 = Manual Mode
+                f'exposure_time_absolute={self.camera_exposure_time}',
+                f'gain={self.camera_gain}',
+                f'power_line_frequency={self.camera_power_line_frequency}',
+            ]
+            try:
+                subprocess.run(
+                    [v4l2, '-d', device, '--set-ctrl', ','.join(controls)],
+                    check=True, capture_output=True, text=True, timeout=5,
+                )
+                self.get_logger().info(
+                    f"Manual exposure applied to '{cam_name}' ({device}): "
+                    f"exposure_time={self.camera_exposure_time}, gain={self.camera_gain}, "
+                    f"power_line_frequency={self.camera_power_line_frequency}"
+                )
+            except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as e:
+                stderr = getattr(e, 'stderr', '') or ''
+                self.get_logger().warn(
+                    f"Failed to set manual exposure on '{cam_name}' ({device}): {e} {stderr}"
+                )
+    
     def cmd_vel_callback(self, msg: Twist):
+
         """Callback for base velocity commands."""
         self.last_base_velocities = {
             "x.vel": msg.linear.x,

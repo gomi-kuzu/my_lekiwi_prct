@@ -195,6 +195,10 @@ ros2 service call /lekiwi_data_recorder/save_dataset std_srvs/srv/Trigger
 - `watchdog_timeout_ms` (int, default: 500): ウォッチドッグタイムアウト (ms)
 - `use_degrees` (bool, default: false): 角度単位を度で使用するか
 - `rotate_front_camera` (bool, default: true): フロントカメラを180度回転するか（カメラが逆さまに取り付けられている場合）
+- `camera_manual_exposure` (bool, default: true): カメラの自動露出(auto_exposure=3)を無効化し、マニュアル露出に固定するか。これらのicSpringカメラは自動露出のままだと暗所で露出時間が伸び、実効フレームレートが~13.5fpsまで低下するため、マニュアル露出で短い露出時間に固定することで~28-30fpsを維持する。`false`にするとドライバーのデフォルト（自動露出）のまま動作する。
+- `camera_exposure_time` (int, default: 200): `camera_manual_exposure=true`時の`exposure_time_absolute`値（100マイクロ秒単位、200 = 20ms）。30fps近くを維持するには200前後を推奨。値を大きくすると画像は明るくなるがフレームレートが低下する可能性がある。
+- `camera_gain` (int, default: 63): `camera_manual_exposure=true`時のアナログゲイン（0〜63）。値が大きいほど画像が明るくなるが、ノイズも増える。これらのカメラでは最大値の63を使用することで、短い露出時間(200)でも十分な明るさ（平均輝度≈104）を確保している。
+- `camera_power_line_frequency` (int, default: 0): フリッカー対策の電源周波数設定（0=Disabled, 1=50Hz, 2=60Hz）。蛍光灯照明下でチラつきが発生する場合は地域に合わせて1または2に設定する。
 
 ### lekiwi_policy_node
 
