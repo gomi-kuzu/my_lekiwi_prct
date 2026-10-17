@@ -540,8 +540,12 @@ ros2 run teleop_twist_keyboard teleop_twist_keyboard \
 ### 4. カメラ画像の表示
 
 ```bash
-rqt_image_view
-# トピック: /lekiwi/camera/front/image_raw/compressed
+# wrist
+ros2 run image_view image_view --ros-args \
+  -r image:=/lekiwi/camera/wrist/image_raw -p image_transport:=compressed
+# front
+ros2 run image_view image_view --ros-args \
+  -r image:=/lekiwi/camera/front/image_raw -p image_transport:=compressed
 ```
 
 ### 5. 関節状態のモニタリング
