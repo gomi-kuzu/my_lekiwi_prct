@@ -352,13 +352,11 @@ bag には両カメラが入っていても、**変換時に含める画像特�
 | `--no-cameras` | 画像なし（`state` / `action` のみ） | 軽量・デバッグ用、proprioception だけのポリシー検証 |
 
 ```bash
-# front カメラだけを含めて変換
 ros2 run lekiwi_ros2_teleop lekiwi_rosbag_to_lerobot \
     --session-dir $HOME/lekiwi_bags/session_20260924_120000 \
     --mode convert \
     --dataset-repo-id john/lekiwi_pick_place_frontonly \
     --fps 30 --sync-tolerance-ms 20 \
-    --cameras front
 
 # 画像を一切含めない state/action のみの dataset
 ros2 run lekiwi_ros2_teleop lekiwi_rosbag_to_lerobot \
