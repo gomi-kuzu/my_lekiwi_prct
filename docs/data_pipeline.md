@@ -181,29 +181,33 @@ rm -rf $HOME/lekiwi_bags/session_20260924_120000/episode_000002
 
 ### 3.8 既知の制約と今後の改善（収集レート）
 
-**現状（2026-10 時点）: カメラは実効 15Hz で運用する。**
+**現状（2026-10 時点）: カメラ有効時も 30Hz で運用できる（解決済み）。**
 
-計測で判明した事実:
+#### 原因と解決（カメラの自動露出）
 
-- `control_frequency=30.0` を指定しているが、カメラ有効時は `/lekiwi/joint_states`・両カメラとも **publish 段階で ~15Hz**（`ros2 topic hz` でライブ計測、間隔 63〜69ms と非常に安定）。
-- **カメラを無効化（`enable_cameras:=false`）すると `/lekiwi/joint_states` は 30Hz ちょうど**出る。
-- したがって `lekiwi_bag_recorder` / QoS は無実で、律速点は **teleop ノードの制御ループ内カメラ取得経路**（Raspberry Pi の USB 帯域・CPU などハード依存を含む）。
+以前はカメラ有効時に `/lekiwi/joint_states`・両カメラとも実効 ~15Hz（間隔 63〜69ms）に落ちていたが、原因はカメラ自体の **自動露出（Aperture Priority, `auto_exposure=3`）** だった。これは周囲が暗いと露出時間を自動的に延ばし、結果として実効キャプチャレートが ~13.5fps まで落ちる挙動で、`enable_cameras:=false` にすると `joint_states` が 30Hz ちょうど出ることからも、律速点がカメラのキャプチャ段階（teleop ノードの制御ループ内カメラ取得経路）にあると特定していた。
+
+[lekiwi_teleop_node.py](../lekiwi_ros2_teleop/lekiwi_teleop_node.py) で **手動露出を強制**することで解決した（`v4l2-ctl` 経由、`_apply_manual_exposure()`）:
+
+| パラメータ | デフォルト | 意味 |
+|---|---|---|
+| `camera_manual_exposure` | `true` | 自動露出を無効化し手動露出を強制する |
+| `camera_exposure_time` | `200`（= 20ms, `exposure_time_absolute` の 100us 単位） | 短い露出時間を固定し ≥28fps を維持。300 を超えると 30fps を割り込み始める |
+| `camera_gain` | `63`（0〜63 の最大） | 露出短縮で失う明るさをゲインで補う（ノイズは増える） |
+| `camera_power_line_frequency` | `0`（Disabled, 1=50Hz, 2=60Hz） | フリッカー補正 |
+
+実測（`ros2 topic hz`、カメラ有効・自動露出 OFF）で `/lekiwi/joint_states` は **average rate ≈ 29.88Hz**（std dev ≈ 0.003s）と安定して 30Hz に到達することを確認済み。自動露出を無効にしたい場合は `camera_manual_exposure:=false` で従来挙動（ドライバ既定の自動露出）に戻せる。
 
 当面の方針:
 
-- **カメラ 15Hz を受け入れ、データセットも 15Hz に揃える**。`convert` 時は `--fps 15` を指定する（`--fps 30` にすると `timestamp = frame_index / fps` が物理時間とズレ、変換時に警告が出る）。
-- 画像観測が 15Hz である以上、学習できるポリシーの実効制御周期も 15Hz が上限。固有受容感覚（joint_states）だけ 30Hz 化しても画像が追いつかないため、現時点では分離しない。
+- **`--fps 30` をそのまま使う**。カメラ有効時でも `joint_states` / カメラとも実測 30Hz なので、§4 の変換は従来通り `--fps 30` で物理時間と一致する。
+- 暗い環境では `camera_gain` を上げてもなお暗い場合、`camera_exposure_time` を上げてフレームレートとのトレードオフを取る（300 付近が 30fps を維持できる上限の目安）。
 
-**今後の改善候補（優先度順、未着手）:**
+**残課題（優先度順、未着手）:**
 
-1. **状態量とカメラの publish を別タイマー/別コールバックグループに分離**（`ReentrantCallbackGroup` + `MultiThreadedExecutor`）。カメラが 15Hz のままでも `joint_states` / action 系を 30Hz で記録でき、オフライン変換側の最近傍同期と相性が良い。
-2. **カメラ取得の非同期化**: LeRobot の `OpenCVCamera` は既に背景スレッド読み出し（`read_latest()` は非ブロッキング）。それでも 15Hz に落ちる原因を切り分ける（USB 帯域競合 vs 単体デバイス上限）。`lsusb -t` で 2 台が同一 USB コントローラ配下でないか確認し、別バスへ分散する。
-3. **解像度・fourcc の最適化**: 既に `fourcc="MJPG"` 設定済み。さらに解像度を下げる / 2 台のカメラ負荷を分散するなどで 30fps 到達可能か検証する。
-4. 上記で 30Hz 化できた場合は、`convert` の `--fps` を 30 に戻す。
-5. **`cmd_vel` を `TwistStamped` 化して header.stamp を持たせる（TODO）**。現状 `/lekiwi/cmd_vel` は `geometry_msgs/Twist` で **header を持たず**、Stage 2 では bag 受信時刻フォールバックで対にしている（計測で確認済み: 他 4 トピック `joint_states` / `arm_joint_commands` / 両カメラは header.stamp 完備、`cmd_vel` のみ header 無し）。単一マシンでは実害は小さいが、複数マシンにまたがると cmd_vel だけ時間軸が受信時刻系になり他トピック（header.stamp 系）とクロック整合が取れない。teleop 側で `TwistStamped` に切り替え、変換側の `_stamp_ns` も header 対応させる。
+1. **`cmd_vel` を `TwistStamped` 化して header.stamp を持たせる（TODO）**。現状 `/lekiwi/cmd_vel` は `geometry_msgs/Twist` で **header を持たず**、Stage 2 では bag 受信時刻フォールバックで対にしている（計測で確認済み: 他 4 トピック `joint_states` / `arm_joint_commands` / 両カメラは header.stamp 完備、`cmd_vel` のみ header 無し）。単一マシンでは実害は小さいが、複数マシンにまたがると cmd_vel だけ時間軸が受信時刻系になり他トピック（header.stamp 系）とクロック整合が取れない。teleop 側で `TwistStamped` に切り替え、変換側の `_stamp_ns` も header 対応させる。
 
-
-> 補足: Raspberry Pi などホスト側のハード制約に依存するため、ハードウェア構成（USB ハブの有無、カメラ機種）を変えた場合は再計測してこの節を更新する。
+> 補足: 自動露出の挙動はカメラ機種・個体差・環境照度に依存するため、別機種を使う場合は `ros2 topic hz` で同様に実測し、必要なら `camera_exposure_time` / `camera_gain` を調整すること。
 
 ---
 
@@ -319,7 +323,7 @@ ros2 run lekiwi_ros2_teleop lekiwi_rosbag_to_lerobot \
 
 **図の見方（3 パネル、横軸はすべて同じ時間窓 [s]）:**
 
-1. **Inter-message period Δt（同期前・生）**: 各トピックの隣接メッセージ間隔 [ms]。水平で安定していれば周期が綺麗（例: カメラ/joint_states は 66ms=15Hz でほぼ一定）。ギザギザ・飛びがあればそのトピックの publish が不安定（例: `cmd_vel` は joy のイベント駆動なので操作中だけ密になる）。
+1. **Inter-message period Δt（同期前・生）**: 各トピックの隣接メッセージ間隔 [ms]。水平で安定していれば周期が綺麗（例: カメラ/joint_states は 33ms=30Hz でほぼ一定）。ギザギザ・飛びがあればそのトピックの publish が不安定（例: `cmd_vel` は joy のイベント駆動なので操作中だけ密になる）。
 2. **Raw message times（同期前のラスター）**: トピックごとに生メッセージ発生時刻を縦線で表示。**緑の網掛けが「全トピックが同時に流れている overlap 窓」**（[§4.5](#45-overlap-トリムとトピック別-gap-内訳) のトリム範囲）。網掛けの左端より前で action 系の縦線が無ければ、そこが「立ち上がりの穴」。トピック間の位相ズレもここで直感的に分かる。
 3. **Nearest-neighbor gap（同期後）**: トリム後の各基準フレームで選ばれた相手との gap [ms]。**赤破線の tolerance 線を全点が下回っていれば、その許容幅で棄却ゼロ**。特定トピックだけ線に張り付く/超えるなら、それが drop 主因（[§4.5](#45-overlap-トリムとトピック別-gap-内訳) の `worst%` と対応）。
 
@@ -342,7 +346,7 @@ ros2 run lekiwi_ros2_teleop lekiwi_rosbag_to_lerobot \
     --session-dir $HOME/lekiwi_bags/session_20260924_120000 \
     --mode convert \
     --dataset-repo-id john/lekiwi_pick_place_frontonly \
-    --fps 15 --sync-tolerance-ms 20 \
+    --fps 30 --sync-tolerance-ms 20 \
     --cameras front
 
 # 画像を一切含めない state/action のみの dataset
@@ -350,7 +354,7 @@ ros2 run lekiwi_ros2_teleop lekiwi_rosbag_to_lerobot \
     --session-dir $HOME/lekiwi_bags/session_20260924_120000 \
     --mode convert \
     --dataset-repo-id john/lekiwi_pick_place_noimg \
-    --fps 15 --sync-tolerance-ms 20 \
+    --fps 30 --sync-tolerance-ms 20 \
     --no-cameras
 ```
 
@@ -639,7 +643,7 @@ lekiwi_validate  --dataset-repo-id john/lekiwi_pick_place_v1
 
 - `ros2 topic hz <topic>` でライブのレートを計測する。bag ではなく **publish 段階**で既に低いかを最初に確認する。
 - `enable_cameras:=false` で起動して `/lekiwi/joint_states` が 30Hz 出るなら、律速点は teleop ノードのカメラ取得経路（[§3.8](#38-既知の制約と今後の改善収集レート)）。
-- カメラが律速なら当面 `--fps 15` でデータセットを揃える。改善候補は [§3.8](#38-既知の制約と今後の改善収集レート) を参照。
+- **原因の多くはカメラの自動露出**（暗所で露出時間が延び ~13.5fps まで低下）。`camera_manual_exposure:=true`（デフォルト）になっているか、`camera_exposure_time` が大きすぎないか（目安 200、300 超は 30fps を割り込み始める）を確認する。詳細は [§3.8](#38-既知の制約と今後の改善収集レート) を参照。
 
 ---
 
