@@ -130,7 +130,7 @@ lekiwi_rosbag_to_lerobot --session-dir ... --mode convert --dataset-repo-id ...
 | `--sync-base-topic` | 時刻同期の基準トピック | 未指定なら observation 系で最も低周波なものを自動選択 | カメラのどちらか（30Hz） |
 | `--sync-tolerance-ms` | 基準stampから他トピック最近傍までの最大許容ズレ [ms]。超えたフレームは棄却 | `20.0` | `analyze` の p95 付近を目安。30Hz なら 15〜25ms |
 | `--action-lag-ms` | action 側のstampに加算するオフセット [ms]。`observation_ts + lag` に最も近い action を採用 | `0.0` | 0 が無難。テレオペのループ遅延を打ち消したいときは `+1/fps` (30Hz なら `+33`) を試す |
-| `--tolerance-sweep-ms` | analyze モードで表示するズレ許容幅の一覧 | `5 10 15 20 25 30 40 50 75 100` | 用途に応じて変更 |
+| `--tolerance-sweep-ms` | analyze モードで表示するズレ許容幅の一覧 | `3 6 9 … 60`（3ms 刻み） | 用途に応じて変更 |
 
 **`--action-lag-ms` の推奨デフォルト** について:
 - 一般的な imitation learning では「観測 obs_t と、その時刻にオペレータが出していた

@@ -214,6 +214,10 @@ rm -rf $HOME/lekiwi_bags/session_20260924_120000/episode_000002
 - 購読側: [lekiwi_teleop_node.py](../lekiwi_ros2_teleop/lekiwi_teleop_node.py) は既定で TwistStamped を購読する（パラメータ `cmd_vel_stamped`、既定 `true`）。`teleop_twist_keyboard` 等の素の Twist を使いたい場合のみ `cmd_vel_stamped:=false`。
 - 変換側: `_stamp_ns` は元から header 優先なので cmd_vel の `header.stamp` を自動採用する。`_action_vec` は `twist.linear.x` 等を参照するよう更新し、**旧 Twist の bag も後方互換で読める**（`twist` 属性が無ければ従来通り直接参照）。signal_spec は `source_field` を `twist.linear.x` 等へ更新し、`SIGNAL_SPEC_VERSION` を `2.1.0` に更新（値・単位は不変）。
 
+> **落とし穴: publisher の型を全員揃える。** 移行途中で `/lekiwi/cmd_vel` に `Twist` を出す publisher（旧 `lekiwi_ros2_teleop_client`）と `TwistStamped` を出す publisher（joy）が **混在**すると、トピックが複数型を持ち（`ros2 topic info -v` で `Type:` が 2 つ並ぶ）、`ros2 bag record` は **そのトピックを無言で丸ごと落とす**（`metadata.yaml` にも現れず、`analyze` で MISSING になる）。0 件記録ではなくトピックごと消える点が分かりにくい。これを受けて cmd_vel を publish する全ノード（joy / policy / `lekiwi_ros2_teleop_client` / 直記録の `lekiwi_data_recorder`）を TwistStamped に統一した。トピックの型を移行するときは **全 publisher と subscriber を同時に揃え**、録画前に `ros2 topic info /lekiwi/cmd_vel -v` で型が 1 つだけであることを確認する（移行前に起動していた古いプロセスが残っていると DDS グラフに旧型 publisher が残るので、再ビルド後は該当ノードを必ず再起動する）。
+
+> **cmd_vel のレートは 30Hz に揃わない（仕様）。** `cmd_vel` は joy のイベント駆動で発行されるため、`joint_states`／カメラのような一定 30Hz ではなく、操作中は joy ノードの送出レート（`autorepeat_rate` 等により ~40Hz 程度になることがある）に従い、無操作時は疎になる。これは不具合ではなく、Stage 2 では `cmd_vel` を **action 側の最近傍ペアリング**で扱うため、基準（観測 30Hz）フレームに対し gap が `--sync-tolerance-ms` 以内に収まっていれば問題にならない。レートの揺らぎが気になる場合は `analyze --plot` のパネル 1（Δt）とパネル 3（nearest-neighbor gap）で、gap が tolerance 線を超えていないかだけを確認すればよい。joy 側の送出レートを下げたい場合は teleop_twist_joy / joy_node の `autorepeat_rate` を調整する。
+
 > 補足: 自動露出の挙動はカメラ機種・個体差・環境照度に依存するため、別機種を使う場合は `ros2 topic hz` で同様に実測し、必要なら `camera_exposure_time` / `camera_gain` を調整すること。
 
 ---
@@ -249,7 +253,7 @@ rm -rf $HOME/lekiwi_bags/session_20260924_120000/episode_000002
 | `--sync-base-topic` | 時刻同期の基準トピック | 未指定なら observation 系で最も低周波なものを自動選択 | カメラ側（通常 30Hz） |
 | `--sync-tolerance-ms` | 基準stampから他トピック最近傍までの最大許容ズレ [ms] | `20.0` | `analyze` の p95 付近。30Hz なら 15〜25 ms |
 | `--action-lag-ms` | 観測フレームに対し、**どの時刻の action をペアにするか**を前後にずらす [ms]（保存される timestamp は変えない） | `0.0` | 0 が無難。テレオペの観測→操作ラグ補正には `+15〜+33 ms` |
-| `--tolerance-sweep-ms` | analyze で表示するズレ許容幅の一覧 | `5 10 15 20 25 30 40 50 75 100` | 適宜変更 |
+| `--tolerance-sweep-ms` | analyze で表示するズレ許容幅の一覧 | `3 6 9 … 60`（3ms 刻み） | 適宜変更 |
 | `--trim-to-overlap` / `--no-trim-to-overlap` | 全トピックが揃って流れている区間だけに基準フレームを絞るか | `--trim-to-overlap`（ON） | 基本 ON のまま |
 | `--cameras [front wrist ...]` / `--no-cameras` | dataset に含める画像特徴量（カメラ）の選択 | 全カメラ | 不要なカメラを省く / 画像なしの軽量 dataset を作る |
 
@@ -631,6 +635,18 @@ lekiwi_validate  --dataset-repo-id john/lekiwi_pick_place_v1
 
 - `stop_episode` は subprocess に SIGINT を送っています。フリーズしている場合は Ctrl+C でノードを落としてください。ノードシャットダウン時にも停止処理を試みます。
 - 壊れた bag は `episode.yaml` の `stop_time` が空 or `bag_sha256` が空です。手動で `episode_XXXXXX/` を削除してください（他エピソードには影響しません）。
+
+### 特定トピック（例 `cmd_vel`）が bag に現れない / `analyze` で MISSING になる
+
+- **最も多い原因は「同一トピックに型の違う publisher が混在」すること。** 例えば `/lekiwi/cmd_vel` に `TwistStamped`（joy）と `Twist`（旧クライアント）が同時に publish されると、トピックが複数型を持ち `ros2 bag record` は **そのトピックを無言で丸ごと落とす**（`metadata.yaml` に現れず、`analyze` で MISSING）。録画前に確認する:
+
+  ```bash
+  ros2 topic info /lekiwi/cmd_vel -v
+  # Type: が 1 つだけ（TwistStamped）であること、Publisher が全て同じ型であることを確認
+  ```
+
+- `Type:` に 2 つの型が並ぶ場合は、古い型を出している publisher ノードを特定して停止する。**再ビルドしただけでは DDS グラフ上の旧プロセスは消えない**ので、該当ノード（旧 `lekiwi_ros2_teleop_client` 等）を必ず再起動する。
+- publisher が 1 つも無い（まだ起動していない）トピックも当然 bag に入らない。`start_episode` 前に joy / クライアントが起動済みか確認する。
 
 ### `analyze` で drop 率がゼロにならない
 

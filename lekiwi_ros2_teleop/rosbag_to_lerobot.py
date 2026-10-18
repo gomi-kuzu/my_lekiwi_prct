@@ -324,7 +324,7 @@ def pick_base_topic(topic_msgs: Dict[str, TopicMessages],
 # ============================================================
 
 
-DEFAULT_TOLERANCE_SWEEP_MS = [5, 10, 15, 20, 25, 30, 40, 50, 75, 100]
+DEFAULT_TOLERANCE_SWEEP_MS = list(range(3, 61, 3))
 
 
 def _short_topic(t: str, width: int = 22) -> str:
