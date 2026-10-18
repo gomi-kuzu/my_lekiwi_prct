@@ -33,7 +33,7 @@ import numpy as np
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
-from geometry_msgs.msg import Twist
+from geometry_msgs.msg import Twist, TwistStamped
 from sensor_msgs.msg import JointState, Image, CompressedImage
 from std_msgs.msg import Float32MultiArray, Header
 
@@ -211,6 +211,10 @@ class LeKiwiTeleopNode(Node):
         self.declare_parameter('enable_cameras', True)  # Allow disabling cameras for debugging
         self.declare_parameter('allow_camera_failure', True)  # Continue robot operation even if cameras fail
         self.declare_parameter('arm_only_mode', False)  # Arm-only mode: disable base and cameras
+        # Subscribe to /lekiwi/cmd_vel as TwistStamped (carries header.stamp so Stage 2
+        # can time-sync it like the other topics). Set False to accept plain Twist
+        # (e.g. teleop_twist_keyboard, or teleop_twist_joy with publish_stamped_twist=false).
+        self.declare_parameter('cmd_vel_stamped', True)
         
         # Get parameters
         robot_port = self.get_parameter('robot_port').value
@@ -233,6 +237,7 @@ class LeKiwiTeleopNode(Node):
         self.enable_cameras = self.get_parameter('enable_cameras').value
         allow_camera_failure = self.get_parameter('allow_camera_failure').value
         self.arm_only_mode = self.get_parameter('arm_only_mode').value
+        self.cmd_vel_stamped = self.get_parameter('cmd_vel_stamped').value
         self._robot_class = LeKiwiArmOnly if self.arm_only_mode else LeKiwi
         if self.arm_only_mode:
             self.enable_cameras = False
@@ -410,12 +415,20 @@ class LeKiwiTeleopNode(Node):
         
         # Create subscribers
         if not self.arm_only_mode:
-            self.cmd_vel_sub = self.create_subscription(
-                Twist,
-                '/lekiwi/cmd_vel',
-                self.cmd_vel_callback,
-                qos_profile
-            )
+            if self.cmd_vel_stamped:
+                self.cmd_vel_sub = self.create_subscription(
+                    TwistStamped,
+                    '/lekiwi/cmd_vel',
+                    self.cmd_vel_callback,
+                    qos_profile
+                )
+            else:
+                self.cmd_vel_sub = self.create_subscription(
+                    Twist,
+                    '/lekiwi/cmd_vel',
+                    self.cmd_vel_callback,
+                    qos_profile
+                )
         
         self.arm_cmd_sub = self.create_subscription(
             JointState,
@@ -492,13 +505,14 @@ class LeKiwiTeleopNode(Node):
                     f"Failed to set manual exposure on '{cam_name}' ({device}): {e} {stderr}"
                 )
     
-    def cmd_vel_callback(self, msg: Twist):
+    def cmd_vel_callback(self, msg):
 
-        """Callback for base velocity commands."""
+        """Callback for base velocity commands (Twist or TwistStamped)."""
+        twist = msg.twist if isinstance(msg, TwistStamped) else msg
         self.last_base_velocities = {
-            "x.vel": msg.linear.x,
-            "y.vel": msg.linear.y,
-            "theta.vel": np.degrees(msg.angular.z),  # Convert rad/s to deg/s
+            "x.vel": twist.linear.x,
+            "y.vel": twist.linear.y,
+            "theta.vel": np.degrees(twist.angular.z),  # Convert rad/s to deg/s
         }
         self.last_cmd_time = self.get_clock().now()
         self.watchdog_active = False

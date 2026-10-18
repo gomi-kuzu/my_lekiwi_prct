@@ -39,8 +39,12 @@ from typing import Any, Dict, List, Optional
 #   (our recording default) or to degrees when use_degrees=True; the gripper is
 #   ALWAYS [0, 100] (MotorNormMode.RANGE_0_100). The previous "rad" label was
 #   incorrect for the data actually recorded.
+#
+# 2.1.0: /lekiwi/cmd_vel is now geometry_msgs/TwistStamped (was Twist) so it
+#   carries header.stamp for Stage 2 time-sync. Base velocity source_field paths
+#   changed accordingly (linear.x -> twist.linear.x, etc.). Values/units unchanged.
 
-SIGNAL_SPEC_VERSION = "2.0.0"
+SIGNAL_SPEC_VERSION = "2.1.0"
 
 
 def build_signal_spec(use_degrees: bool = False) -> Dict[str, Any]:
@@ -131,15 +135,15 @@ def build_signal_spec(use_degrees: bool = False) -> Dict[str, Any]:
                 {"name": "x.vel", "kind": "base_velocity_command",
                  "unit": "m/s", "absolute": True, "frame": "base_link",
                  "source_topic": "/lekiwi/cmd_vel",
-                 "source_field": "linear.x"},
+                 "source_field": "twist.linear.x"},
                 {"name": "y.vel", "kind": "base_velocity_command",
                  "unit": "m/s", "absolute": True, "frame": "base_link",
                  "source_topic": "/lekiwi/cmd_vel",
-                 "source_field": "linear.y"},
+                 "source_field": "twist.linear.y"},
                 {"name": "theta.vel", "kind": "base_velocity_command",
                  "unit": "rad/s", "absolute": True, "frame": "base_link",
                  "source_topic": "/lekiwi/cmd_vel",
-                 "source_field": "angular.z"},
+                 "source_field": "twist.angular.z"},
             ],
             "value_type": "absolute",  # not delta / not residual
             "gripper_command": {

@@ -48,7 +48,7 @@ def generate_launch_description():
         # スタンプ付きTwistメッセージを発行するか
         launch.actions.DeclareLaunchArgument(
             'publish_stamped_twist', 
-            default_value='false',
+            default_value='true',
             description='Publish TwistStamped instead of Twist'
         ),
         

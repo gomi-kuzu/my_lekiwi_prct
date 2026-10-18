@@ -74,7 +74,7 @@ flowchart LR
 - `/lekiwi/camera/front/image_raw/compressed`
 - `/lekiwi/camera/wrist/image_raw/compressed`
 
-タイムスタンプは各メッセージの `header.stamp` を第一に、無い場合は bag 受信時刻をフォールバックとして使う。
+タイムスタンプは各メッセージの `header.stamp` を第一に、無い場合は bag 受信時刻をフォールバックとして使う。`/lekiwi/cmd_vel` は `geometry_msgs/TwistStamped` で publish しており（teleop_twist_joy は `publish_stamped_twist:=true`、推論時は `lekiwi_policy_node` が TwistStamped を発行）、5 トピックすべてが `header.stamp` を持つ。
 
 ### 3.4 サービス
 
@@ -203,9 +203,16 @@ rm -rf $HOME/lekiwi_bags/session_20260924_120000/episode_000002
 - **`--fps 30` をそのまま使う**。カメラ有効時でも `joint_states` / カメラとも実測 30Hz なので、§4 の変換は従来通り `--fps 30` で物理時間と一致する。
 - 暗い環境では `camera_gain` を上げてもなお暗い場合、`camera_exposure_time` を上げてフレームレートとのトレードオフを取る（300 付近が 30fps を維持できる上限の目安）。
 
-**残課題（優先度順、未着手）:**
+**`cmd_vel` の `TwistStamped` 化（解決済み）:**
 
-1. **`cmd_vel` を `TwistStamped` 化して header.stamp を持たせる（TODO）**。現状 `/lekiwi/cmd_vel` は `geometry_msgs/Twist` で **header を持たず**、Stage 2 では bag 受信時刻フォールバックで対にしている（計測で確認済み: 他 4 トピック `joint_states` / `arm_joint_commands` / 両カメラは header.stamp 完備、`cmd_vel` のみ header 無し）。単一マシンでは実害は小さいが、複数マシンにまたがると cmd_vel だけ時間軸が受信時刻系になり他トピック（header.stamp 系）とクロック整合が取れない。teleop 側で `TwistStamped` に切り替え、変換側の `_stamp_ns` も header 対応させる。
+以前は `/lekiwi/cmd_vel` が `geometry_msgs/Twist` で **header を持たず**、Stage 2 では bag 受信時刻フォールバックで対にしていた（他 4 トピック `joint_states` / `arm_joint_commands` / 両カメラは header.stamp 完備、`cmd_vel` のみ header 無し）。単一マシンでは実害は小さいが、複数マシンにまたがると cmd_vel だけ時間軸が受信時刻系になり他トピックとクロック整合が取れない問題があった。
+
+これを解消するため `/lekiwi/cmd_vel` を **`geometry_msgs/TwistStamped`** に切り替え、`header.stamp` を持たせた:
+
+- teleop（joy）: [custom_teleop.launch.py](../launch/custom_teleop.launch.py) の `publish_stamped_twist` を既定 `true` にし、`teleop_twist_joy` が TwistStamped を発行する。
+- 推論: [lekiwi_policy_node.py](../lekiwi_ros2_teleop/lekiwi_policy_node.py) が `header.stamp`（`frame_id=base_link`）付き TwistStamped を発行する。
+- 購読側: [lekiwi_teleop_node.py](../lekiwi_ros2_teleop/lekiwi_teleop_node.py) は既定で TwistStamped を購読する（パラメータ `cmd_vel_stamped`、既定 `true`）。`teleop_twist_keyboard` 等の素の Twist を使いたい場合のみ `cmd_vel_stamped:=false`。
+- 変換側: `_stamp_ns` は元から header 優先なので cmd_vel の `header.stamp` を自動採用する。`_action_vec` は `twist.linear.x` 等を参照するよう更新し、**旧 Twist の bag も後方互換で読める**（`twist` 属性が無ければ従来通り直接参照）。signal_spec は `source_field` を `twist.linear.x` 等へ更新し、`SIGNAL_SPEC_VERSION` を `2.1.0` に更新（値・単位は不変）。
 
 > 補足: 自動露出の挙動はカメラ機種・個体差・環境照度に依存するため、別機種を使う場合は `ros2 topic hz` で同様に実測し、必要なら `camera_exposure_time` / `camera_gain` を調整すること。
 

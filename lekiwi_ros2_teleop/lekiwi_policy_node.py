@@ -36,7 +36,7 @@ import numpy as np
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
-from geometry_msgs.msg import Twist
+from geometry_msgs.msg import Twist, TwistStamped
 from sensor_msgs.msg import JointState, CompressedImage
 from std_msgs.msg import String
 from std_srvs.srv import Trigger, SetBool
@@ -210,8 +210,10 @@ class LeKiwiPolicyNode(Node):
         )
         
         # Publishers (commands to robot)
+        # Publish base velocity as TwistStamped so it carries header.stamp (matches
+        # the teleop node's default TwistStamped subscription and lets Stage 2 time-sync it).
         self.cmd_vel_pub = self.create_publisher(
-            Twist, '/lekiwi/cmd_vel', qos_profile
+            TwistStamped, '/lekiwi/cmd_vel', qos_profile
         )
         self.arm_joint_cmd_pub = self.create_publisher(
             JointState, '/lekiwi/arm_joint_commands', qos_profile
@@ -842,12 +844,14 @@ class LeKiwiPolicyNode(Node):
         base_keys = ['x.vel', 'y.vel', 'theta.vel']
         
         if all(key in action for key in base_keys):
-            cmd_vel = Twist()
-            cmd_vel.linear.x = float(action['x.vel'])
-            cmd_vel.linear.y = float(action['y.vel'])
-            cmd_vel.angular.z = float(action['theta.vel'])
+            cmd_vel = TwistStamped()
+            cmd_vel.header.stamp = self.get_clock().now().to_msg()
+            cmd_vel.header.frame_id = 'base_link'
+            cmd_vel.twist.linear.x = float(action['x.vel'])
+            cmd_vel.twist.linear.y = float(action['y.vel'])
+            cmd_vel.twist.angular.z = float(action['theta.vel'])
             
-            self.get_logger().debug(f'Publishing base command: linear=({cmd_vel.linear.x}, {cmd_vel.linear.y}), angular.z={cmd_vel.angular.z}', throttle_duration_sec=1.0)
+            self.get_logger().debug(f'Publishing base command: linear=({cmd_vel.twist.linear.x}, {cmd_vel.twist.linear.y}), angular.z={cmd_vel.twist.angular.z}', throttle_duration_sec=1.0)
             self.cmd_vel_pub.publish(cmd_vel)
         else:
             self.get_logger().debug(f'Missing base commands in action (this is normal). Available keys: {list(action.keys())}', throttle_duration_sec=5.0)

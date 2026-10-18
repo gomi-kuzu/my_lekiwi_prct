@@ -720,7 +720,10 @@ def _action_vec(arm_cmd, cmd_vel) -> np.ndarray:
     else:
         arm = positions + [0.0] * (6 - len(positions))
     if cmd_vel is not None:
-        base = [cmd_vel.linear.x, cmd_vel.linear.y, cmd_vel.angular.z]
+        # cmd_vel may be geometry_msgs/Twist (legacy) or geometry_msgs/TwistStamped
+        # (current; carries header.stamp). Unwrap the nested twist if present.
+        twist = getattr(cmd_vel, "twist", cmd_vel)
+        base = [twist.linear.x, twist.linear.y, twist.angular.z]
     else:
         base = [0.0, 0.0, 0.0]
     return np.array(arm + base, dtype=np.float32)
