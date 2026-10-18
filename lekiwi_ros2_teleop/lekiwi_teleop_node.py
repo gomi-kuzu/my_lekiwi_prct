@@ -177,13 +177,12 @@ class LeKiwiTeleopNode(Node):
         # NOTE: Hub port may enumerate differently depending on physical port.
         # Update this if `ls /dev/v4l/by-path/` shows a different suffix on your system.
         self.declare_parameter('wrist_camera_device', 
-            '/dev/v4l/by-path/platform-xhci-hcd.1-usb-0:1.2:1.0-video-index0,/dev/video0')
+            '/dev/v4l/by-path/platform-xhci-hcd.1-usb-0:1.1:1.0-video-index0,/dev/video0')
         
         ##### not use usb-hub #########
-        # self.declare_parameter('front_camera_device', 
-        #     '/dev/v4l/by-path/platform-xhci-hcd.1-usb-0:2:1.0-video-index0,/dev/video0,/dev/video2')  
-        # self.declare_parameter('wrist_camera_device', 
-        #     '/dev/v4l/by-path/platform-xhci-hcd.0-usb-0:2:1.0-video-index0,/dev/video0,/dev/video2,/dev/video3')  
+#         この辺は、USBケーブルを別の場所に差し替えると名前が変わる
+#         調べる、コマンド
+#         ls -la /dev/v4l/by-path/ 2>&1; echo "---by-id---"; ls -la /dev/v4l/by-id/ 2>&1; echo "---list-devices---"; v4l2-ctl --list-devices 2>&1
         ##---------------------------##
 
         # Camera settings
