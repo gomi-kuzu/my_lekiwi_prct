@@ -32,7 +32,7 @@ import numpy as np
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
-from geometry_msgs.msg import Twist
+from geometry_msgs.msg import Twist, TwistStamped
 from sensor_msgs.msg import JointState, CompressedImage
 from std_srvs.srv import Trigger
 
@@ -177,7 +177,7 @@ class LeKiwiDataRecorder(Node):
         )
         
         self.cmd_vel_sub = self.create_subscription(
-            Twist,
+            TwistStamped,
             '/lekiwi/cmd_vel',
             self.cmd_vel_callback,
             qos_profile
@@ -225,7 +225,7 @@ class LeKiwiDataRecorder(Node):
         
         # Internal state
         self.latest_joint_state: Optional[JointState] = None
-        self.latest_cmd_vel: Optional[Twist] = None
+        self.latest_cmd_vel: Optional[TwistStamped] = None
         self.latest_arm_cmd: Optional[JointState] = None
         self.latest_front_image: Optional[np.ndarray] = None
         self.latest_wrist_image: Optional[np.ndarray] = None
@@ -401,7 +401,7 @@ class LeKiwiDataRecorder(Node):
         """Callback for robot joint state."""
         self.latest_joint_state = msg
     
-    def cmd_vel_callback(self, msg: Twist):
+    def cmd_vel_callback(self, msg: TwistStamped):
         """Callback for base velocity commands."""
         self.latest_cmd_vel = msg
     
@@ -629,10 +629,11 @@ class LeKiwiDataRecorder(Node):
         
         # Extract base velocity commands (x, y, theta)
         if self.latest_cmd_vel is not None:
+            base_twist = getattr(self.latest_cmd_vel, "twist", self.latest_cmd_vel)
             base_vel_commands = [
-                self.latest_cmd_vel.linear.x,   # x.vel_cmd
-                self.latest_cmd_vel.linear.y,   # y.vel_cmd
-                self.latest_cmd_vel.angular.z,  # theta.vel_cmd
+                base_twist.linear.x,   # x.vel_cmd
+                base_twist.linear.y,   # y.vel_cmd
+                base_twist.angular.z,  # theta.vel_cmd
             ]
         else:
             base_vel_commands = [0.0, 0.0, 0.0]

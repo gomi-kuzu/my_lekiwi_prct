@@ -31,7 +31,7 @@ import numpy as np
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
-from geometry_msgs.msg import Twist
+from geometry_msgs.msg import Twist, TwistStamped
 from sensor_msgs.msg import JointState, CompressedImage
 from std_msgs.msg import Header
 
@@ -178,8 +178,11 @@ class LeKiwiROS2TeleopClient(Node):
         )
         
         # Create publishers
+        # Publish as TwistStamped so /lekiwi/cmd_vel carries header.stamp (matches
+        # teleop_twist_joy with publish_stamped_twist:=true and the teleop node's
+        # default TwistStamped subscription; also lets Stage 2 time-sync it).
         self.cmd_vel_pub = self.create_publisher(
-            Twist,
+            TwistStamped,
             '/lekiwi/cmd_vel',
             qos_profile
         )
@@ -327,13 +330,15 @@ class LeKiwiROS2TeleopClient(Node):
     
     def _publish_base_commands(self, base_action: dict):
         """Publish base velocity commands."""
-        msg = Twist()
-        
+        msg = TwistStamped()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.header.frame_id = 'base_link'
+
         # Expected keys: x.vel, y.vel, theta.vel (in degrees/s)
-        msg.linear.x = base_action.get('x.vel', 0.0)
-        msg.linear.y = base_action.get('y.vel', 0.0)
-        msg.angular.z = np.radians(base_action.get('theta.vel', 0.0))  # Convert deg/s to rad/s
-        
+        msg.twist.linear.x = base_action.get('x.vel', 0.0)
+        msg.twist.linear.y = base_action.get('y.vel', 0.0)
+        msg.twist.angular.z = np.radians(base_action.get('theta.vel', 0.0))  # Convert deg/s to rad/s
+
         self.cmd_vel_pub.publish(msg)
     
     def shutdown(self):
