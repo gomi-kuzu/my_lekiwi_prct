@@ -23,7 +23,7 @@
 LeKiwiオムニホイールロボット（6自由度アーム搭載）のROS2制御システムとLeRobotフレームワークを統合し、テレオペレーション、データ収集、モデル推論を実現する。
 
 ### 主要機能
-1. **テレオペレーション**: SO100 Leader Armとキーボードによる遠隔操作
+1. **テレオペレーション**: SO-101 Leader ArmとキーボードやJoyコントローラによる遠隔操作
 2. **データ収集**: LeRobot Dataset v3形式での学習データ記録
 3. **ポリシー推論**: 学習済みモデルによる自律制御（分散システム対応）
 4. **データセット管理**: 可視化、検証、Hugging Face Hubアップロード
@@ -135,7 +135,7 @@ LeKiwiオムニホイールロボット（6自由度アーム搭載）のROS2制
 
 #### ハードウェアインターフェース
 - **ロボット通信**: LeKiwi Python SDK（ZMQ/ROS2ブリッジ）
-- **リーダーアーム**: SO100 Leader Arm（LeRobot互換）
+- **リーダーアーム**: SO-101 Leader Arm（LeRobot互換）
 - **カメラ**: USB Webカメラ × 2（フロント・リスト）
 
 #### 推論エンジン
@@ -507,12 +507,14 @@ arm_action = action_array[3:9]
 
 #### 必須ドキュメント
 ```
-README.md                      # プロジェクト概要、クイックスタート（リポジトリルート）
+README.md                      # パッケージ概要、アーキテクチャ、ビルド、クイックスタート（リポジトリルート）
 docs/
-├── RECORDING.md               # データ記録の詳細ガイド
-├── POLICY_INFERENCE.md        # ポリシー推論の詳細ガイド
-├── data_pipeline.md           # rosbag → LeRobot Dataset 変換パイプライン
-└── custom_joy_setup.md        # ジョイスティック設定
+├── setup.md                   # インストール・カメラ設定・環境変数
+├── nodes.md                   # ノード・トピック・パラメータのリファレンス
+├── data_pipeline.md           # rosbag → LeRobot Dataset 変換パイプライン（推奨）
+├── policy_inference.md        # ポリシー推論の詳細ガイド
+├── custom_joy_setup.md        # ジョイスティック設定
+└── recording.md               # LeRobot へ直接記録する旧経路（非推奨）
 .github/
 └── copilot-instructions.md    # このファイル
 ```
@@ -679,7 +681,7 @@ def stop_episode_callback(self, request, response):
 **責務**: テレオペレーション入力のROS2トピック変換
 
 **主要機能**:
-- SO100 Leader Armからアーム指令取得
+- SO-101 Leader Armからアーム指令取得
 - キーボード/Joystickからベース指令取得
 - ROS2トピックへの指令配信
 

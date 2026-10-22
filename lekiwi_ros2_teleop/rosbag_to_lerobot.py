@@ -26,7 +26,7 @@ Action / Observation lag
 - `--action-lag-ms` は action 側のタイムスタンプに加算するオフセット。
   すなわち base_ts (obs) に対して `action_ts = base_ts + lag` に最も近い
   action メッセージを選ぶ。
-- 推奨デフォルトは 0 ms。SO100 系のテレオペで観察 → 指令のフィードバック
+- 推奨デフォルトは 0 ms。SO101 系のテレオペで観察 → 指令のフィードバック
   遅延を打ち消したい場合、1 制御周期 (30Hz なら +33ms) 程度で試すと
   よい。まずは analyze でズレ分布を見てから決めるのが安全。
 """

@@ -1,91 +1,44 @@
 # LeKiwi ROS2 Teleoperation
 
-ROS2を使用したLeKiwiロボットのテレオペレーションと推論などのノード
+ROS2 を使用した LeKiwi ロボットのテレオペレーション・推論・データ収集を行うパッケージ。
 
-## 概要
+## パッケージ概要
 
-このパッケージは、テレオペレーション・推論・データ収集/変換を担う複数のノードとCLIツールで構成される。役割ごとに整理すると次のとおり。
+**LeRobot ライブラリ**（ハードウェア抽象化・ML 推論）と **ROS2**（通信・システム統合）を
+組み合わせ、両者をつなぐブリッジノード群で構成する。実機制御・自律推論・模倣学習用データ収集を
+ノード単位で差し替えられるのが特徴。
 
-### 制御・推論ノード
+| 実行名 | 種別 | 役割 |
+|---|---|---|
+| `lekiwi_teleop_node` | ノード | LeKiwi 実機を制御（コマンド受信・状態/カメラ配信） |
+| `lekiwi_policy_node` | ノード | 学習済みポリシーで自律制御（GPU PC 上で実行） |
+| `lekiwi_ros2_teleop_client` | ノード | SO-101 Leader Arm / キーボード入力を送信 |
+| `lekiwi_bag_recorder` | ノード | テレオペを MCAP bag で記録（データパイプライン Stage 1） |
+| `lekiwi_rosbag_to_lerobot` | CLI | bag を LeRobot Dataset v3 に変換（Stage 2） |
+| `lekiwi_data_recorder` | ノード | LeRobot v3 へ直接記録する旧経路（非推奨） |
+| `lekiwi_upload_dataset` | CLI | データセットを Hugging Face Hub にアップロード |
 
-1. **lekiwi_teleop_node**: `lekiwi_host.py`を参考に作成されており、ZMQ通信の代わりにROS2トピック通信を使用してLeKiwiロボットを制御する。
-
-2. **lekiwi_policy_node**: 学習済みポリシーモデルを使用してロボットを自律制御する。デスクトップPC（GPU搭載）上で実行し、ROS2トピック経由でlekiwi_teleop_nodeと通信する。詳細は[docs/POLICY_INFERENCE.md](docs/POLICY_INFERENCE.md)を参照すること。
-
-3. **lekiwi_ros2_teleop_client**: SO100 Leader ArmとKeyboardからのテレオペレーション入力を受け取り、ROS2トピック経由でlekiwi_teleop_nodeを制御する。
-
-### データ収集・変換（データパイプライン）
-
-4. **lekiwi_bag_recorder**: テレオペレーション中のトピックを生データ（MCAP bag）のまま記録する。エピソード単位でセッション/プロヴェナンス情報も保存する（データパイプラインのStage 1）。
-
-5. **lekiwi_rosbag_to_lerobot**: 記録したbagを時刻同期しながらLeRobot Dataset v3形式へ変換するCLIツール（データパイプラインのStage 2）。
-
-6. **lekiwi_data_recorder**: テレオペレーション中のデータをLeRobot Dataset v3形式で直接記録する（bagを介さない旧来の記録経路）。
-
-7. **lekiwi_upload_dataset**: 生成したデータセットをHugging Face HubへアップロードするCLIツール。
-
-> データパイプラインの設計・使い方の詳細は[docs/data_pipeline.md](docs/data_pipeline.md)を参照すること。
-
-
-## データ記録
-
-テレオペレーション中のデータを記録してVLAモデルのトレーニング用データセットを作成できる。
-より詳細な使用方法やトラブルシューティングについては、[docs/RECORDING.md](docs/RECORDING.md)を参照すること。
-
-**クイックスタート:**
-
-```bash
-# データ記録を開始
-ros2 launch lekiwi_ros2_teleop lekiwi_record.launch.py \
-    launch_teleop:=false \
-    dataset_repo_id:=username/my_dataset \
-    single_task:="Pick and place the cube" \
-    fps:=30
-
-# エピソード開始
-ros2 service call /lekiwi_data_recorder/start_episode std_srvs/srv/Trigger
-
-# エピソード終了
-ros2 service call /lekiwi_data_recorder/stop_episode std_srvs/srv/Trigger
-
-# データセット保存
-ros2 service call /lekiwi_data_recorder/save_dataset std_srvs/srv/Trigger
-```
-
-**主な機能:**
-- LeRobot Dataset v3形式での記録
-- カメラ画像（フロント・リスト）と関節状態の同期記録
-- エピソード単位での管理
-- Hugging Face Hubへのアップロード対応
+各ノードのトピック・パラメータの詳細は [docs/nodes.md](docs/nodes.md) を参照すること。
 
 ## アーキテクチャ
 
-### 設計思想：LeRobot × ROS2 の役割分担
-
-本パッケージは **LeRobotライブラリ**（ロボット学習基盤）と **ROS2**（ロボットミドルウェア）を組み合わせた構成をとる。
+**LeRobot × ROS2 の役割分担:**
 
 | 層 | 担当 | 役割 |
 |---|---|---|
-| **LeRobot** | ハードウェア抽象化・ML推論 | モーター制御、データセット、ポリシー推論 |
+| **LeRobot** | ハードウェア抽象化・ML 推論 | モーター制御、データセット、ポリシー推論 |
 | **ROS2** | 通信・システム統合 | ノード間通信、分散実行、モニタリング |
-| **ブリッジノード** | 変換 | LeRobotのdict形式 ↔ ROS2メッセージ型 |
+| **ブリッジノード** | 変換 | LeRobot の dict 形式 ↔ ROS2 メッセージ型 |
 
-**このアーキテクチャのメリット：**
+LeRobot は ROS2 非依存のまま保たれ、ブリッジ層が変換を担うため、`ros2 topic echo` /
+`ros2 bag` などの ROS2 ツールでそのまま監視・記録・再生できる。
 
-- **拡張性**: ノード単位で機能を追加・差し替えできる。例えばデータ記録ノードを追加しても、他ノードへの変更が不要
-- **分散実行の透過性**: `lekiwi_teleop_node`（RasPi）と`lekiwi_policy_node`（GPU PC）がネットワーク越しに同一システムとして動作する。実行場所を変えても他ノードの変更が不要
-- **可観測性**: `ros2 topic echo` / `ros2 topic hz` / `ros2 bag` でリアルタイム監視・記録・再生が即座に可能。追加コードなしに `rqt_image_view` 等で可視化できる
-- **LeRobotの独立性維持**: LeRobotはROS2非依存のまま保たれる。ブリッジ層が変換を担うため、LeRobotのAPIが変わっても影響範囲がブリッジ層に局所化される
-- **ノード単位の独立テスト**: 各ノードを個別に起動・停止・差し替えできる。`policy_node`の開発中に記録済みの`ros2 bag`で観測データを再生してテストするといった使い方も可能
-
----
-
-### パターン1: ダイレクトテレオペレーション（lekiwi_ros2_teleop_client）
+**パターン1: ダイレクトテレオペレーション**
 
 ```
 ┌────────────────────┐
-│ SO101 Leader Arm   │
-│ JoyController      │
+│ SO-101 Leader Arm  │
+│ Joy Controller     │
 └─────────┬──────────┘
           │ input
           ↓
@@ -95,411 +48,119 @@ ros2 service call /lekiwi_data_recorder/save_dataset std_srvs/srv/Trigger
 └──────────┬──────────────┘
            │ publishes (ROS2)
            ↓
-    ┌──────────────┐
-    │ /cmd_vel     │
-    │ /arm_joint_  │
-    │  commands    │
-    └──────┬───────┘
-           │ subscribes
-           ↓
+   ┌───────────────────┐
+   │ /lekiwi/cmd_vel   │
+   │ /lekiwi/arm_joint_│
+   │  commands         │
+   └────────┬──────────┘
+            │ subscribes
+            ↓
 ┌─────────────────────┐
 │  lekiwi_teleop_node │ → LeKiwi Robot
 └─────────────────────┘
 ```
 
-## 機能
-
-### lekiwi_teleop_node
-
-- **トピック通信**: ROS2トピックを使用したロボット制御
-- **アーム制御**: 6自由度アームの位置制御
-- **ベース制御**: オムニホイールベースの速度制御
-- **カメラ配信**: フロントとリストカメラの画像配信
-- **ウォッチドッグ**: コマンドが一定時間受信されない場合、ベースを自動停止
-
-### lekiwi_policy_node
-
-- **ポリシー推論**: 学習済みポリシーモデルをロードし、カメラ画像・関節状態から次のアクションを推論
-- **リモート実行**: GPU搭載PC上で動作し、ROS2トピック経由でlekiwi_teleop_nodeと通信
-- **サービス制御**: `/lekiwi/policy/start` / `/lekiwi/policy/stop` サービスで推論の開始・停止を制御
-- **周波数設定**: `control_frequency`パラメータで制御ループ周波数を設定可能（30Hzで動作）
-
-詳細は[docs/POLICY_INFERENCE.md](docs/POLICY_INFERENCE.md)を参照すること。
-
-### lekiwi_ros2_teleop_client
-
-- **テレオペレーション**: SO100 Leader ArmとKeyboardからの入力取得
-- **ROS2パブリッシュ**: lekiwi_teleop_nodeへコマンド送信
-- **環境変数対応**: `LEKIWI_REMOTE_IP`でLeKiwiのIPアドレスを指定
-- **可視化**: Rerun統合によるリアルタイムモニタリング（オプション）
-
-## トピック
-
-### Subscribe (受信)
-
-- `/lekiwi/cmd_vel` (geometry_msgs/Twist): ベース速度コマンド
-  - `linear.x`: X方向速度 (m/s)
-  - `linear.y`: Y方向速度 (m/s)
-  - `angular.z`: 回転速度 (rad/s)
-
-- `/lekiwi/arm_joint_commands` (sensor_msgs/JointState): アーム関節位置コマンド
-  - 6つの関節位置
-
-### Publish (配信)
-
-- `/lekiwi/joint_states` (sensor_msgs/JointState): 現在のロボット状態
-  - `position`: アーム関節位置
-  - `velocity`: ベース速度
-
-- `/lekiwi/camera/front/image_raw/compressed` (sensor_msgs/CompressedImage): フロントカメラ画像
-
-- `/lekiwi/camera/wrist/image_raw/compressed` (sensor_msgs/CompressedImage): リストカメラ画像
-
-## パラメータ
-
-### lekiwi_teleop_node
-
-- `robot_port` (string, default: "/dev/ttyACM0"): ロボットのシリアルポート
-- `control_frequency` (float, default: 30.0): 制御ループ周波数 (Hz)
-- `watchdog_timeout_ms` (int, default: 500): ウォッチドッグタイムアウト (ms)
-- `use_degrees` (bool, default: false): 角度単位を度で使用するか
-- `rotate_front_camera` (bool, default: true): フロントカメラを180度回転するか（カメラが逆さまに取り付けられている場合）
-- `camera_manual_exposure` (bool, default: true): カメラの自動露出(auto_exposure=3)を無効化し、マニュアル露出に固定するか。これらのicSpringカメラは自動露出のままだと暗所で露出時間が伸び、実効フレームレートが~13.5fpsまで低下するため、マニュアル露出で短い露出時間に固定することで~28-30fpsを維持する。`false`にするとドライバーのデフォルト（自動露出）のまま動作する。
-- `camera_exposure_time` (int, default: 200): `camera_manual_exposure=true`時の`exposure_time_absolute`値（100マイクロ秒単位、200 = 20ms）。30fps近くを維持するには200前後を推奨。値を大きくすると画像は明るくなるがフレームレートが低下する可能性がある。
-- `camera_gain` (int, default: 63): `camera_manual_exposure=true`時のアナログゲイン（0〜63）。値が大きいほど画像が明るくなるが、ノイズも増える。これらのカメラでは最大値の63を使用することで、短い露出時間(200)でも十分な明るさ（平均輝度≈104）を確保している。
-- `camera_power_line_frequency` (int, default: 0): フリッカー対策の電源周波数設定（0=Disabled, 1=50Hz, 2=60Hz）。蛍光灯照明下でチラつきが発生する場合は地域に合わせて1または2に設定する。
-
-### lekiwi_policy_node
-
-- `policy_path` (string, **必須**): 学習済みポリシーのチェックポイントパス
-- `dataset_repo_id` (string, **必須**): データセットのリポジトリ ID（特徴取得用）
-- `control_frequency` (float, default: 30.0): 制御ループ周波数 (Hz)
-- `device` (string, default: "cuda"): 推論に使用するデバイス
-- `single_task` (string, default: ""): タスクの単一言語説明
-- `use_amp` (bool, default: false): 自動混合精度を使用するか
-
-詳細は[docs/POLICY_INFERENCE.md](docs/POLICY_INFERENCE.md)を参照すること。
-
-### lekiwi_ros2_teleop_client
-
-- `lekiwi_remote_ip` (string, default: ""): LeKiwiのIPアドレス（空の場合は環境変数`LEKIWI_REMOTE_IP`を使用）
-- `lekiwi_id` (string, default: "my_lekiwi"): LeKiwiのID
-- `leader_arm_port` (string, default: "/dev/tty.usbmodem585A0077581"): SO100 Leader Armのシリアルポート
-- `leader_arm_id` (string, default: "my_leader_arm"): Leader ArmのID
-- `keyboard_id` (string, default: "my_keyboard"): KeyboardのID
-- `control_frequency` (float, default: 30.0): 制御ループ周波数 (Hz)
-- `use_rerun` (bool, default: false): Rerun可視化を使用するか
-- `use_keyboard` (bool, default: true): 内部キーボードテレオペレーションを使用するか（falseの場合は外部のteleop_twist_keyboardを使用）
-
-## セットアップ
-
-### 0. インストール
-
-#### ROS2 (RoboStack)
-
-- mini-forge3かmicromambaをインストールする
-
-- [RoboStack Getting Started](https://robostack.github.io/GettingStarted.html#__tabbed_3_3) の手順に従い、conda または micromamba 環境に ROS2 Jazzy をインストールする
-
-- 以降は基本的に仮想環境をアクティベート状態のものとする
-```bash
-#mini-forge3の場合
-conda activate [環境名]
-#micromambaの場合 
-micromamba activate [環境名]
-```
-
-#### LeRobot
-
-ROS2 環境をアクティベートした状態で以下を実行：
-
-```bash
-# リポジトリをクローン
-git clone https://github.com/huggingface/lerobot.git ~/lerobot
-
-# ffmpegをconda経由でインストール（動画エンコード用）
-conda install ffmpeg -c conda-forge
-
-# LeRobotをlekiwi/feetech/zeromqオプション付きでインストール
-cd ~/lerobot
-pip install -e ".[lekiwi,feetech,zeromq]"
-```
-
-インストール後、`LEROBOT_PATH` 環境変数を設定する（後述の「環境変数の設定」を参照）。
-
----
-
-### 1. カメラデバイスパスの確認と設定（必須）
-
-カメラの `/dev/v4l/by-path/` パスは **USBポートの物理的な接続位置に依存する**。
-カメラを別のポートに挿し直したり、ラズパイを再起動したりするとパスが変わる場合がある。
-初回セットアップ時、および接続を変更した際は必ず以下の手順でパスを確認すること。
-
-#### ステップ1: 接続されているカメラのパスを確認
-
-```bash
-# by-pathの一覧（カメラデバイスのみ）
-ls -la /dev/v4l/by-path/ | grep video-index0
-
-# USBトポロジーの確認（バス帯域の確認に有用）
-lsusb -t
-```
-
-出力例：
-```
-lrwxrwxrwx ... platform-xhci-hcd.1-usb-0:2:1.0-video-index0 -> ../../video0
-lrwxrwxrwx ... platform-xhci-hcd.1-usb-0:1.3:1.0-video-index0 -> ../../video2
-```
-
-#### ステップ2: ノードのデフォルトパラメータを更新
-
-`lekiwi_teleop_node.py` の以下の箇所を実際のパスに書き換えること：
-
-```python
-# src/lekiwi_ros2_teleop/lekiwi_ros2_teleop/lekiwi_teleop_node.py (80行目付近)
-self.declare_parameter('front_camera_device',
-    '/dev/v4l/by-path/<フロントカメラのby-path>,/dev/video0')
-self.declare_parameter('wrist_camera_device',
-    '/dev/v4l/by-path/<リストカメラのby-path>,/dev/video2')
-```
-
-または、ノード起動時にパラメータで指定することもできる：
-
-```bash
-ros2 run lekiwi_ros2_teleop lekiwi_teleop_node \
-  --ros-args \
-  -p robot_port:=/dev/ttyACM0 \
-  -p front_camera_device:='/dev/v4l/by-path/platform-xhci-hcd.1-usb-0:2:1.0-video-index0,/dev/video0' \
-  -p wrist_camera_device:='/dev/v4l/by-path/platform-xhci-hcd.1-usb-0:1.3:1.0-video-index0,/dev/video2'
-```
-
-> **注意**: カンマ区切りで複数のパスを指定できる。最初のパスで失敗した場合、次のパスが試される（フォールバック）。
-
-#### USB帯域の注意事項
-
-2台のカメラを使用する場合、**両カメラを同じUSBバスに接続すると帯域不足でフレームタイムアウトが発生**する場合がある。
+**パターン2: ポリシー推論（分散実行）**
 
 ```
-# 帯域不足の症状
-[ERROR] Timed out waiting for frame from camera OpenCVCamera(...) after 200 ms.
+┌──────────────────────┐   observations (ROS2)   ┌─────────────────────┐
+│  Desktop PC (GPU)    │ ◄─────────────────────  │  LeKiwi (RasPi)     │
+│  lekiwi_policy_node  │   joint_states / images │  lekiwi_teleop_node │
+│   - policy inference │ ──────────────────────► │   - robot control   │
+└──────────────────────┘   commands (ROS2)       └─────────────────────┘
 ```
 
-対処法：
-- 2台のカメラを**異なるUSBコントローラー**（`xhci-hcd.0` と `xhci-hcd.1`）に分けて接続する
-    - `lsusb -t` でバス構成を確認し、カメラが異なる `Bus` に接続されていることが理想。
+詳細は [docs/policy_inference.md](docs/policy_inference.md) を参照すること。
 
----
+## 検証済み環境・依存関係
 
-### 2. 環境変数の設定
+- ROS2 Jazzy
+- Python 3.12
+- rclpy / geometry_msgs / sensor_msgs / cv_bridge
+- opencv-python (cv2) / numpy / torch
+- [LeRobot](https://github.com/huggingface/lerobot) **v0.6.2 以上**（LeKiwi ハードウェア抽象化・ポリシー推論）
 
-#### LEROBOT_PATH
+### 環境変数
 
-LeRobotのパスを環境変数として設定する。
-シェルの設定ファイルを編集すること：
+- `LEROBOT_PATH`（**必須**）: LeRobot ライブラリの `src` ディレクトリへのパス
+- `LEKIWI_REMOTE_IP`（`lekiwi_ros2_teleop_client` で必須）: LeKiwi ロボットの IP アドレス
+  （ROS2 トピック通信ではなく、LeRobot の `LeKiwiClient` による ZeroMQ 直接接続に使う）
 
-**bashの場合 (`~/.bashrc`):**
-```bash
-# LeRobotの設定（パスを適宜置き換えること）
-export LEROBOT_PATH="/path/to/your/lerobot/src"
-```
-
-#### LEKIWI_REMOTE_IP（lekiwi_ros2_teleop_clientで必須）
-
-テレオペレーションクライアントを使用する場合、LeKiwiのIPアドレスを設定する：
-
-```bash
-# LeKiwiのIPアドレスを設定
-export LEKIWI_REMOTE_IP="172.18.134.136"
-```
-
-設定を反映：
-```bash
-source ~/.bashrc  # または source ~/.zshrc
-```
-
-<!-- ### 2. 環境変数の確認
-
-正しく設定されているか確認する：
-```bash
-echo $LEROBOT_PATH
-# 出力例: /home/your_username/study/lerobot/src
-
-echo $LEKIWI_REMOTE_IP
-# 出力例: 172.18.134.136
-```
-
-**注意**: 環境変数が設定されていない場合、ノードの起動時にエラーが発生する。 -->
+環境変数が未設定だと、各ノードは起動時にエラーを出力する。
+インストール・カメラ設定・環境変数の詳細は [docs/setup.md](docs/setup.md) を参照すること。
 
 ## ビルド
+
 ```bash
-cd [ros2のワークスペース]
+cd [ROS2 のワークスペース]
 colcon build --packages-select lekiwi_ros2_teleop
 source install/setup.bash
 ```
 
-## 実行
+> 以降、各ターミナルで作業する前に `source install/setup.bash` を実行すること。
 
-> **各ターミナルで ROS2 のセットアップを忘れずに実行すること：**
->
-> ```bash
-> cd [ros2のワークスペース]
-> source install/setup.bash
-> ```
+## クイックスタート
 
-### 1. テレオペレーション
+### テレオペレーション
 
-#### ターミナル1: LeKiwi上でlekiwi_teleop_nodeを起動
+**ターミナル1（LeKiwi 実機上）: 制御ノードを起動**
 
 ```bash
-# LeKiwiロボット上で実行
 ros2 run lekiwi_ros2_teleop lekiwi_teleop_node \
   --ros-args -p robot_port:=/dev/ttyACM0
 ```
 
-#### ターミナル2: PC上でlekiwi_ros2_teleop_clientを起動
+**ターミナル2（PC 上）: テレオペクライアントを起動**
 
 ```bash
-# 環境変数を設定（.bashrcに書いていない場合）
-export LEROBOT_PATH="$HOME/study/lerobot/src"
+export LEROBOT_PATH="$HOME/lerobot/src"
 export LEKIWI_REMOTE_IP="172.18.134.136"
 
-# キーボードテレオペレーションを無効化して起動（推奨）
 ros2 run lekiwi_ros2_teleop lekiwi_ros2_teleop_client \
   --ros-args \
   -p leader_arm_port:=/dev/ttyACM0 \
   -p use_keyboard:=false
-
-# パラメータ指定の例
-ros2 run lekiwi_ros2_teleop lekiwi_ros2_teleop_client \
-  --ros-args \
-  -p leader_arm_port:=/dev/ttyACM0 \
-  -p control_frequency:=30.0 \
-  -p use_keyboard:=false \
-  -p use_rerun:=true
 ```
 
-#### ターミナル3: PC上でteleop_twist_keyboardを起動（ベース制御用）
+**ターミナル3（PC 上）: ベースをキーボードで操作**
 
 ```bash
-# 標準のROS2キーボードテレオペレーションを使用
 ros2 run teleop_twist_keyboard teleop_twist_keyboard \
   --ros-args -r /cmd_vel:=/lekiwi/cmd_vel
 ```
 
-これで、SO100 Leader Armでロボットアームを、teleop_twist_keyboardでベースを操作できる。
+SO-101 Leader Arm でアームを、`teleop_twist_keyboard` でベースを操作できる。
+ジョイスティックで操作する場合は `teleop_twist_keyboard` の代わりに次を起動する:
 
-#### キーボード操作方法（teleop_twist_keyboard）
-
-ターミナル3にフォーカスを当てて、以下のキーで台車を操作する：
-
-#### キーボード操作方法（teleop_twist_keyboard）
-
-ターミナル3にフォーカスを当てて、以下のキーで台車を操作する：
-
-**基本移動:**
-- **i**: 前進
-- **,**: 後退
-- **j**: 左回転
-- **l**: 右回転
-- **k**: 停止
-
-**斜め移動:**
-- **u**: 前進+左回転
-- **o**: 前進+右回転
-- **m**: 後退+左回転
-- **.**: 後退+右回転
-
-**速度調整:**
-- **q**: 速度アップ（全体）
-- **z**: 速度ダウン（全体）
-- **w**: 直進速度のみアップ
-- **x**: 直進速度のみダウン
-- **e**: 回転速度のみアップ
-- **c**: 回転速度のみダウン
-
-**終了:**
-- **Ctrl+C**: 終了
-
-**注意事項:**
-- キーボード入力が動作するには、teleop_twist_keyboardを実行しているターミナルウィンドウにフォーカスが当たっている必要がある
-- キーを押し続ける必要はない。一度押せば継続的に動作する
-- 停止するには**k**キーを押すこと
-
-
-- ※joyコンで操作することも可能
-    - その場合は`teleop_twist_keyboard`の代わりに以下を起動
 ```bash
 ros2 launch lekiwi_ros2_teleop custom_teleop.launch.py
 ```
-#### 動作確認
 
-別のターミナルで以下のコマンドを実行して、cmd_velトピックが配信されているか確認できる：
+### 動作確認
 
 ```bash
-# ベース速度コマンドの監視
+# ベース速度コマンドの監視 / 配信頻度の確認
 ros2 topic echo /lekiwi/cmd_vel
-
-# または、トピックの配信頻度を確認
 ros2 topic hz /lekiwi/cmd_vel
-```
 
-<!-- teleop_twist_keyboardでキーを押したときに、`/lekiwi/cmd_vel`にメッセージが配信されていれば正常。 -->
+# 関節状態のモニタリング
+ros2 topic echo /lekiwi/joint_states
 
-### 3. キーボード単独でベース制御（Leader Armなし）
-
-Leader Armを使用せず、キーボードのみでベースを制御する場合：
-
-```bash
-# teleop_twist_keyboardパッケージを使用
-ros2 run teleop_twist_keyboard teleop_twist_keyboard \
-  --ros-args -r /cmd_vel:=/lekiwi/cmd_vel
-```
-
-### 4. カメラ画像の表示
-
-```bash
-# wrist
-ros2 run image_view image_view --ros-args \
-  -r image:=/lekiwi/camera/wrist/image_raw -p image_transport:=compressed
-# front
+# カメラ画像の表示
 ros2 run image_view image_view --ros-args \
   -r image:=/lekiwi/camera/front/image_raw -p image_transport:=compressed
 ```
 
-### 5. 関節状態のモニタリング
+## ドキュメント
 
-```bash
-ros2 topic echo /lekiwi/joint_states
-```
-
-## 依存関係
-
-- ROS2 Jazzy
-- rclpy
-- geometry_msgs
-- sensor_msgs
-- cv_bridge
-- opencv-python (cv2)
-- numpy
-- torch
-- lerobot (LeKiwiロボットライブラリとVLAモデル)
-
-### 環境変数
-
-- `LEROBOT_PATH` (**必須**): LeRobotライブラリのsrcディレクトリへのパス  
-- `LEKIWI_REMOTE_IP` (lekiwi_ros2_teleop_clientで必須): LeKiwiロボットのIPアドレス
-
-**注意**: 環境変数が設定されていないと、各ノードは起動時にエラーを出力する。
-
-<!--
- ## 参考リンク
-
-- **LeRobot GitHub**: https://github.com/huggingface/lerobot
-- **LeRobot HuggingFace**: https://huggingface.co/lerobot
-- **SmolVLA論文**: https://arxiv.org/abs/2506.01844
-- **LeRobot ドキュメント**: https://huggingface.co/docs/lerobot
-- **LeRobot Discord**: https://discord.gg/s3KuuzsPFb 
--->
+| ドキュメント | 内容 |
+|---|---|
+| [docs/setup.md](docs/setup.md) | インストール・カメラ設定・環境変数 |
+| [docs/nodes.md](docs/nodes.md) | ノード・トピック・パラメータのリファレンス |
+| [docs/data_pipeline.md](docs/data_pipeline.md) | データ収集 → 変換パイプライン（**推奨**） |
+| [docs/policy_inference.md](docs/policy_inference.md) | ポリシー推論ノードの使い方 |
+| [docs/custom_joy_setup.md](docs/custom_joy_setup.md) | ジョイスティック設定 |
+| [docs/recording.md](docs/recording.md) | LeRobot へ直接記録する旧経路（非推奨） |
 
 ## ライセンス
 
