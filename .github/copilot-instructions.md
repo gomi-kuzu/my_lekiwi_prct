@@ -24,7 +24,7 @@ LeKiwiオムニホイールロボット（6自由度アーム搭載）のROS2制
 
 ### 主要機能
 1. **テレオペレーション**: SO-101 Leader ArmとキーボードやJoyコントローラによる遠隔操作
-2. **データ収集**: LeRobot Dataset v3形式での学習データ記録
+2. **データ収集**: 4ステージデータパイプライン（収集 → フォーマッティング → キュレーション → 検証）で LeRobot Dataset v3 を生成。raw bag（MCAP）を先に保存し、後工程で同期・変換する（**推奨**）
 3. **ポリシー推論**: 学習済みモデルによる自律制御（分散システム対応）
 4. **データセット管理**: 可視化、検証、Hugging Face Hubアップロード
 
@@ -514,7 +514,7 @@ docs/
 ├── data_pipeline.md           # rosbag → LeRobot Dataset 変換パイプライン（推奨）
 ├── policy_inference.md        # ポリシー推論の詳細ガイド
 ├── custom_joy_setup.md        # ジョイスティック設定
-└── recording.md               # LeRobot へ直接記録する旧経路（非推奨）
+└── direct_recording.md               # LeRobot へ直接記録する旧経路（非推奨）
 .github/
 └── copilot-instructions.md    # このファイル
 ```
@@ -650,7 +650,9 @@ ros2 launch lekiwi_ros2_teleop lekiwi_policy.launch.py \
 
 ### 3. lekiwi_data_recorder.py
 
-**責務**: テレオペデータのLeRobot Dataset v3形式での記録
+**責務**: テレオペデータのLeRobot Dataset v3形式での直接記録（**旧経路・非推奨**）
+
+> 現在の推奨経路は「データパイプライン」（`lekiwi_bag_recorder` → `lekiwi_rosbag_to_lerobot`）。本ノードは LeRobot v3 に直接書き込む旧方式で、新規機能はパイプライン側に実装すること。
 
 **主要機能**:
 - ROS2トピックから観測・指令を記録
@@ -687,7 +689,42 @@ def stop_episode_callback(self, request, response):
 
 **実行環境**: Desktop PC
 
-### 5. サポートスクリプト
+### 5. データパイプライン（推奨経路）
+
+模倣学習用データを **収集 → フォーマッティング → キュレーション → 検証** の 4 ステージで扱う。詳細設計は [docs/data_pipeline.md](../docs/data_pipeline.md)。
+
+**設計原則**:
+- **Raw first, format later**: リアルタイム側は取りこぼしゼロを最優先し、生データ（MCAP）を保存。時刻同期・特徴量定義・エンコードは後工程で何度でも作り直す。
+- **単一の Signal Spec**: 単位・座標系・absolute/relative・gripper 表現を [lekiwi_metadata.py](../lekiwi_ros2_teleop/lekiwi_metadata.py) の `build_signal_spec()` に一元化。`SIGNAL_SPEC_VERSION` が破壊的変更のトリガ。
+- **プロヴァネンス必須**: どの生 bag から、どの commit・どのパラメータで生成された dataset かを常に輿れるようにする（`provenance/`、`meta/info.json` の `x_lekiwi` キー）。
+
+#### 5.1 lekiwi_bag_recorder.py（Stage 1: 収集）
+
+**責務**: テレオペの ROS2 トピックを **CompressedImage のまま** MCAP に記録（1 bag = 1 episode）。動画エンコードはしない。
+
+**主要機能**:
+- 内部で `ros2 bag record -s mcap` を subprocess 起動し、`start_episode` / `stop_episode` サービスで制御
+- 収集時の環境・機材・コード状態を `session.yaml` / `episode.yaml` / `software.json` に保存
+- 各 bag の SHA256 を計算して改変検知を可能にする
+
+**実行環境**: Desktop PC（または収集用ホスト）
+
+#### 5.2 rosbag_to_lerobot.py（Stage 2: フォーマッティング）
+
+**責務**: Stage 1 の raw bag を LeRobot Dataset v3 に変換（`ros2 run lekiwi_ros2_teleop lekiwi_rosbag_to_lerobot`）。
+
+**主要機能**:
+- `header.stamp` ベースの最近傍同期。`--sync-tolerance-ms` / `--sync-base-topic` / `--action-lag-ms` をパラメータ化
+- `analyze` モードで棄却率を事前可視化（`--plot` でタイミング図）、`convert` モードで実生成
+- `meta/info.json` へ `x_lekiwi` サマリを注入し、`provenance/` に完全な変換履歴を書き出す
+
+**実行環境**: Desktop PC
+
+#### 5.3 Stage 3 キュレーション / Stage 4 検証（予定）
+
+エピソード選別・ラベル修正・split 割当（`lekiwi_curate`）、スキーマ/分布/リプレイ整合性検証（`lekiwi_validate`）は今後実装予定。
+
+### 6. サポートスクリプト
 
 #### upload_dataset.py
 - データセットをHugging Face Hubにアップロード
@@ -1111,11 +1148,14 @@ nvidia-smi -l 1
 ## バージョン管理
 
 ### このドキュメントのバージョン
-- **Version**: 1.1
+- **Version**: 1.2
 - **Last Updated**: 2026-10-22
 - **Author**: LeKiwi ROS2 Development Team
 
 ### 更新履歴
+- **1.2 (2026-10-22)**:
+  - データパイプライン（`lekiwi_bag_recorder` → `lekiwi_rosbag_to_lerobot` の 4 ステージ）を既存コンポーネント・主要機能に追記
+  - `lekiwi_data_recorder` を旧経路（非推奨）として明記
 - **1.1 (2026-10-22)**:
   - `lekiwi_vla_node`（未完成・デッドコード）の削除に伴い関連記述を除去
   - LeRobot API参照を現行名前空間（`lerobot.datasets` / `lerobot.policies` / `lerobot.robots` 等）に更新

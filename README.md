@@ -114,7 +114,7 @@ ros2 run lekiwi_ros2_teleop lekiwi_teleop_node \
 
 ```bash
 export LEROBOT_PATH="$HOME/lerobot/src"
-export LEKIWI_REMOTE_IP="172.18.134.136"
+export LEKIWI_REMOTE_IP="<LEKIWI_IP>"   # 例: LEKIWI_REMOTE_IP="172.18.11.100"
 
 ros2 run lekiwi_ros2_teleop lekiwi_ros2_teleop_client \
   --ros-args \
@@ -160,7 +160,7 @@ ros2 run image_view image_view --ros-args \
 | [docs/data_pipeline.md](docs/data_pipeline.md) | データ収集 → 変換パイプライン（**推奨**） |
 | [docs/policy_inference.md](docs/policy_inference.md) | ポリシー推論ノードの使い方 |
 | [docs/custom_joy_setup.md](docs/custom_joy_setup.md) | ジョイスティック設定 |
-| [docs/recording.md](docs/recording.md) | LeRobot へ直接記録する旧経路（非推奨） |
+| [docs/direct_recording.md](docs/direct_recording.md) | LeRobot へ直接記録する旧経路（非推奨） |
 
 ## ライセンス
 

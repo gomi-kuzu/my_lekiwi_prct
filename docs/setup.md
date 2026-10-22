@@ -21,10 +21,12 @@ ROS2 Jazzy をインストールする。公式のネイティブインストー
 # リポジトリをクローン
 git clone https://github.com/huggingface/lerobot.git ~/lerobot
 
-# 動画エンコード用に ffmpeg を用意（ディストリ標準の apt でも可）
-# LeKiwi / Feetech / ZeroMQ オプション付きでインストール
+# 動画エンコード用に ffmpeg を用意（ディストリ標準の apt でも可:sudo apt install ffmpeg）
+
 cd ~/lerobot
-pip install -e ".[lekiwi,feetech,zeromq]"
+pip install -e ".[core_scripts,lekiwi,feetech]"
+pip install -e ".[smolvla]"
+pip install -e ".[dataset,training]"
 ```
 
 インストール後、`LEROBOT_PATH` 環境変数を設定する（[§3](#3-環境変数)）。
@@ -98,7 +100,7 @@ export LEROBOT_PATH="/path/to/your/lerobot/src"
 テレオペレーションクライアントを使う場合、LeKiwi の IP アドレスを設定する:
 
 ```bash
-export LEKIWI_REMOTE_IP="172.18.134.136"
+export LEKIWI_REMOTE_IP="<LEKIWI_IP>"   # 例: LEKIWI_REMOTE_IP="172.18.11.100"
 ```
 
 > **なぜ必須か**: このIPはROS2トピックの通信（同一ネットワークなら DDS が自動検出するため不要）には使われない。

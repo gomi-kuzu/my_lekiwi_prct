@@ -14,7 +14,7 @@
 | `lekiwi_ros2_teleop_client` | ノード | SO-101 Leader Arm / キーボード入力を受け取りコマンド送信 |
 | `lekiwi_bag_recorder` | ノード | テレオペ中のトピックを MCAP bag で記録（パイプライン Stage 1） |
 | `lekiwi_rosbag_to_lerobot` | CLI | bag を LeRobot Dataset v3 に変換（パイプライン Stage 2） |
-| `lekiwi_data_recorder` | ノード | LeRobot v3 へ直接記録する旧経路（非推奨。[recording.md](recording.md) 参照） |
+| `lekiwi_data_recorder` | ノード | LeRobot v3 へ直接記録する旧経路（非推奨。[direct_recording.md](direct_recording.md) 参照） |
 | `lekiwi_upload_dataset` | CLI | データセットを Hugging Face Hub にアップロード |
 
 ---

@@ -129,7 +129,7 @@ ros2 launch lekiwi_ros2_teleop lekiwi_bag_record.launch.py \
     output_root:=$HOME/lekiwi_bags \
     single_task:="Pick and place the bottle cap" \
     target_fps:=30 \
-    operator:="inoma" \
+    operator:="<operator>" \
     location:="lab_A" \
     note:="lighting: overhead LED, run 3" \
     front_camera_id:="realsense_D435_serial123" \
@@ -549,7 +549,7 @@ ros2 launch lekiwi_ros2_teleop lekiwi_bag_record.launch.py \
     launch_teleop:=false \
     output_root:=$HOME/lekiwi_bags \
     single_task:="Pick and place the bottle cap" \
-    operator:="inoma"
+    operator:="<operator>"
 
 # 3) エピソード制御 (別ターミナル)
 ros2 service call /lekiwi_bag_recorder/start_episode std_srvs/srv/Trigger

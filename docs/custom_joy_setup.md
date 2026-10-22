@@ -2,7 +2,7 @@
 
 ## 概要
 
-teleop_twist_joyでカスタムコントローラを使用するための設定方法です。
+teleop_twist_joyでカスタムコントローラを使用するための設定方法。
 
 ## ファイル構成
 
@@ -11,25 +11,23 @@ teleop_twist_joyでカスタムコントローラを使用するための設定�
 
 ## ステップ1: コントローラのボタンマッピングを確認
 
-まず、あなたのコントローラのボタンと軸のマッピングを確認します。
+まず、お使いのコントローラのボタンと軸のマッピングを確認する。
 
 ```bash
-# 環境をアクティベート
-conda activate leros_jazzy
-source /home/inoma/jazzy_ws/install/setup.bash
+# ワークスペースを読み込む
+source $HOME/jazzy_ws/install/setup.bash
 
 # joyノードを起動
 ros2 run joy joy_node
 
 # 別のターミナルで
-conda activate leros_jazzy
-source /home/inoma/jazzy_ws/install/setup.bash
+source $HOME/jazzy_ws/install/setup.bash
 
 # Joyトピックを監視
 ros2 topic echo /joy
 ```
 
-コントローラのボタンやスティックを動かして、どの番号が反応するか確認してください：
+コントローラのボタンやスティックを動かして、どの番号が反応するか確認する：
 
 - **axes配列**: スティックの値（-1.0 ~ 1.0）
   - 例: axes[0], axes[1] など
@@ -38,7 +36,7 @@ ros2 topic echo /joy
 
 ## ステップ2: 設定ファイルを編集
 
-`config/custom_joy.config.yaml`を編集して、あなたのコントローラに合わせます：
+`config/custom_joy.config.yaml`を編集して、お使いのコントローラに合わせる：
 
 ```yaml
 teleop_twist_joy_node:
@@ -96,8 +94,7 @@ teleop_twist_joy_node:
 ## ステップ3: カスタム設定で起動
 
 ```bash
-conda activate leros_jazzy
-source /home/inoma/jazzy_ws/install/setup.bash
+source $HOME/jazzy_ws/install/setup.bash
 
 # カスタム設定で起動
 ros2 launch lekiwi_ros2_teleop custom_teleop.launch.py
@@ -108,24 +105,23 @@ ros2 launch lekiwi_ros2_teleop custom_teleop.launch.py
 別のターミナルで`/lekiwi/cmd_vel`トピックを確認：
 
 ```bash
-conda activate leros_jazzy
-source /home/inoma/jazzy_ws/install/setup.bash
+source $HOME/jazzy_ws/install/setup.bash
 
 # cmd_velトピックを監視
 ros2 topic echo /lekiwi/cmd_vel
 ```
 
-コントローラを操作して、以下の値が変化することを確認してください：
+コントローラを操作して、以下の値が変化することを確認する：
 - `linear.x`: 前後移動速度
 - `linear.y`: 左右移動速度（LeKiwiは全方向移動可能）
 - `angular.z`: 回転速度
 
 ## 参考: 他のコントローラ設定例
 
-標準的なコントローラ設定は以下にあります：
+標準的なコントローラ設定は以下にある：
 
 ```bash
-ls /home/inoma/miniforge3/envs/leros_jazzy/share/teleop_twist_joy/config/
+ls $(ros2 pkg prefix teleop_twist_joy)/share/teleop_twist_joy/config/
 ```
 
 - `ps3.config.yaml` - PlayStation 3コントローラ
@@ -133,7 +129,7 @@ ls /home/inoma/miniforge3/envs/leros_jazzy/share/teleop_twist_joy/config/
 - `xbox.config.yaml` - Xboxコントローラ
 - `atk3.config.yaml` - ATK3コントローラ
 
-これらを参考にすることもできます。
+これらを参考にすることもできる。
 
 ## トラブルシューティング
 
@@ -143,7 +139,7 @@ ls /home/inoma/miniforge3/envs/leros_jazzy/share/teleop_twist_joy/config/
    ```bash
    ros2 param get /teleop_twist_joy_node require_enable_button
    ```
-   - `true`の場合、`enable_button`を押しながら操作する必要があります
+   - `true`の場合、`enable_button`を押しながら操作する必要がある
    - 一時的に無効化: `ros2 param set /teleop_twist_joy_node require_enable_button false`
 
 2. **軸マッピングの確認**
@@ -160,7 +156,7 @@ ls /home/inoma/miniforge3/envs/leros_jazzy/share/teleop_twist_joy/config/
 
 ### 動きが逆向き
 
-軸の符号を反転させる必要があります。設定ファイルで軸番号を負の値にします：
+軸の符号を反転させる必要がある。設定ファイルで軸番号を負の値にする：
 
 ```yaml
 axis_linear:
@@ -173,7 +169,7 @@ axis_angular:
 
 ### 速度を調整したい
 
-`scale_linear`、`scale_linear_turbo`、`scale_angular`の値を調整してください：
+`scale_linear`、`scale_linear_turbo`、`scale_angular`の値を調整する：
 
 ```yaml
 scale_linear:

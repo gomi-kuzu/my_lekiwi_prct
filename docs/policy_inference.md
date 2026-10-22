@@ -1,12 +1,12 @@
 # LeKiwi Policy Inference Node
 
-このドキュメントでは、学習済みモデルを使用してLeKiwiロボットを自律制御するための推論ノードの使用方法を説明します。
+このドキュメントは、学習済みモデルを使用してLeKiwiロボットを自律制御するための推論ノードの使用方法をまとめたもの。
 
 ## 概要
 
-`lekiwi_policy_node`は、LeRobotで学習された方策モデル（policy）を使用してロボットを自律制御するためのROS2ノードです。
+`lekiwi_policy_node`は、LeRobotで学習された方策モデル（policy）を使用してロボットを自律制御するためのROS2ノード。
 
-**重要**: このノードはGPUを搭載したデスクトップPCで実行し、ROS2トピック経由でラズベリーパイ上の`lekiwi_teleop_node`と通信します。直接ロボットに接続する必要はありません。
+**重要**: このノードはGPUを搭載したデスクトップPCで実行し、ROS2トピック経由でラズベリーパイ上の`lekiwi_teleop_node`と通信する。直接ロボットに接続する必要はない。
 
 ## システム構成
 
@@ -44,9 +44,12 @@
 4. データセットがローカルに存在している
 5. ROS2がインストールされている
 6. (オプション) CUDAが利用可能
-ステップ1: ラズベリーパイでロボット制御ノードを起動
 
-まず、ラズベリーパイ上で`lekiwi_teleop_node`を起動します：
+## 起動手順
+
+### ステップ1: ラズベリーパイでロボット制御ノードを起動
+
+まず、ラズベリーパイ上で`lekiwi_teleop_node`を起動する：
 
 ```bash
 # ラズベリーパイ上で実行
@@ -62,7 +65,7 @@ ros2 run lekiwi_ros2_teleop lekiwi_teleop_node
 
 ### ステップ2: デスクトップPCで推論ノードを起動
 
-次に、デスクトップPC上で推論ノードを起動します：
+次に、デスクトップPC上で推論ノードを起動する：
 
 ```bash
 # デスクトップPC上で実行
@@ -89,25 +92,25 @@ ros2 service call /lekiwi/policy/start std_srvs/srv/Trigger
 - `policy_path`: 学習済みモデルのディレクトリパス
   - 例: `~/outputs/train/2025-01-15/14-30-00/checkpoints/last`
 - `dataset_repo_id`: 学習に使用したデータセットのリポジトリID
-  - 例: `gomi-kuzu/lekiwi_pick_place`
-  - 正規化統計などのメタデータ取得に使用します。
+  - 以下は次の例で示す: `gomi-kuzu/lekiwi_pick_place`
+  - 正規化統計などのメタデータ取得に使用する。
 
 > **重要（データセットのパス解決）**: データセットは `{dataset_root}/{dataset_repo_id}`
-> の場所から読み込まれます（HuggingFace標準レイアウト）。
-> 例えば `dataset_root:=/home/inoma/jazzy_ws/output` かつ
+> の場所から読み込まれる（HuggingFace標準レイアウト）。
+> 例えば `dataset_root:=$HOME/jazzy_ws/output` かつ
 > `dataset_repo_id:=gomi-kuzu/lekiwi_dance_and_bow` の場合、
-> `/home/inoma/jazzy_ws/output/gomi-kuzu/lekiwi_dance_and_bow` が読み込まれます。
+> `$HOME/jazzy_ws/output/gomi-kuzu/lekiwi_dance_and_bow` が読み込まれる。
 >
-> - 上記が見つからない場合、`dataset_root` 自体をデータセットとして読み込みます（警告を表示）。
+> - 上記が見つからない場合、`dataset_root` 自体をデータセットとして読み込む（警告を表示）。
 > - どちらにも `meta/info.json` が無い場合は、無関係なデータセットを黙って読み込まず、
->   明確なエラーで停止します。
+>   明確なエラーで停止する。
 > - 起動ログに実際に読み込んだ**絶対パスとフレーム数**が出力されるので、
->   意図したデータセットか必ず確認してください。
+>   意図したデータセットか必ず確認すること。
 
 #### オプションパラメータ
 
 - `dataset_root`: データセットの親ディレクトリ（デフォルト: `~/lerobot_datasets`）
-  - 実際のデータセットは `{dataset_root}/{dataset_repo_id}` から読み込まれます。
+  - 実際のデータセットは `{dataset_root}/{dataset_repo_id}` から読み込まれる。
 - `control_frequency`: 制御ループの周波数（デフォルト: `30.0` Hz)
 - `device`: 推論デバイス（デフォルト: `cuda`、他に `cpu`, `mps`）
 - `use_amp`: 自動混合精度を使用（デフォルト: `false`）
@@ -120,24 +123,24 @@ ros2 service call /lekiwi/policy/start std_srvs/srv/Trigger
   - 有効化すると `n_action_steps` は自動的に `1` に強制される（LeRobotの制約）。
 - `clamp_zero_std_state`: 学習時に分散がほぼ0だった観測次元を学習平均に固定（デフォルト: `true`）
   - データ収集中ずっと一定だった次元（例: 動かさなかったグリッパー）は、学習統計の
-    標準偏差が極小（例: `~4e-7`）になります。この次元に実機のわずかなズレが入ると、
-    MEAN_STD正規化で `(値 - 平均) / 極小std` が巨大化し、推論が破綻します。
-  - 本機能は該当次元を学習平均に固定することでこれを防ぎます。多様な値をとる次元
-    （std が閾値以上）はそのまま通常どおり推論されるため、副作用はありません。
-  - 無効化するには `clamp_zero_std_state:=false` を指定します。
-- `zero_std_threshold`: 上記で「分散がほぼ0」とみなす標準偏差のしきい値（デフォルト: `1e-4`）
+    標準偏差が極小（例: `~4e-7`）になる。この次元に実機のわずかなズレが入ると、
+    MEAN_STD正規化で `(値 - 平均) / 極小std` が巨大化し、推論が破綻する。
+  - 本機能は該当次元を学習平均に固定することでこれを防ぐ。多様な値をとる次元
+    （std が閾値以上）はそのまま通常どおり推論されるため、副作用はない。
+  - 無効化するには `clamp_zero_std_state:=false` を指定する。
+- `zero_std_threshold`: 上記で「分散がほ̇0」とみなす標準偏差のしきい値（デフォルト: `1e-4`）
   - 正規化器は一定信号でも厳密な0ではなく極小のstdを保存するため、`== 0` ではなく
-    しきい値で判定します。実際に変動する最小次元のstd（例: 台車速度 ~0.02）より
-    十分小さい値に設定してください。
+    しきい値で判定する。実際に変動する最小次元のstd（例: 台車速度 ~0.02）より
+    十分小さい値に設定すること。
 
 > **補足**: 学習済みモデルは `n_action_steps=100`, `chunk_size=100`, `temporal_ensemble_coeff=null`
 > の場合、1回の推論で得た100ステップを約3.3秒（30Hz時）かけてオープンループ実行してから
-> 次の推論を行います。反応性を高めたい場合は `n_action_steps` を小さくするか、
-> `temporal_ensemble_coeff` を有効化してください（いずれも再学習不要）。
+> 次の推論を行う。反応性を高めたい場合は `n_action_steps` を小さくするか、
+> `temporal_ensemble_coeff` を有効化する（いずれも再学習不要）。
 
 ### サービスでの制御
 
-ノード起動後、以下のサービスで推論の開始/停止を制御できます：
+ノード起動後、以下のサービスで推論の開始/停止を制御できる：
 
 ```bash
 # 推論開始
@@ -223,7 +226,7 @@ ros2 launch lekiwi_ros2_teleop lekiwi_policy.launch.py \
 
 ### ロボットに接続できない
 
-**注意**: 推論ノードはロボットに直接接続しません。ラズベリーパイ側の問題です。
+**注意**: 推論ノードはロボットに直接接続しない。ラズベリーパイ側の問題である。
 
 - `lekiwi_teleop_node`がラズベリーパイで起動しているか確認
 - ロボットの電源が入っているか確認
@@ -231,7 +234,7 @@ ros2 launch lekiwi_ros2_teleop lekiwi_policy.launch.py \
 
 ## アーキテクチャの詳細
 
-このノードは分散システム向けに設計されています：
+このノードは分散システム向けに設計されている：
 
 1. **観測取得**: ROS2トピックから観測データを受信（`/lekiwi/joint_states`, カメラ画像）
 2. **データ変換**: `build_dataset_frame()`で観測をデータセット形式に変換
@@ -247,7 +250,7 @@ ros2 launch lekiwi_ros2_teleop lekiwi_policy.launch.py \
 
 ## 実装の詳細
 
-このノードは`lerobot-record`コマンドの`--policy.path`オプション機能を参考に実装されています：
+このノードは`lerobot-record`コマンドの`--policy.path`オプション機能を参考に実装されている：
 
 1. **観測取得**: ROS2トピックからロボットの状態とカメラ画像を取得
 2. **データ変換**: `build_dataset_frame()`で観測をデータセット形式に変換
@@ -256,7 +259,7 @@ ros2 launch lekiwi_ros2_teleop lekiwi_policy.launch.py \
 
 ## 参考
 
-- 元のスクリプト: `~/study/lerobot/src/lerobot/scripts/lerobot_record.py`
+- 元のスクリプト: `$LEROBOT_PATH/lerobot/scripts/lerobot_record.py`
 - データ記録ノード: [lekiwi_data_recorder.py](../lekiwi_ros2_teleop/lekiwi_data_recorder.py)
 - テレオペノード: [lekiwi_teleop_node.py](../lekiwi_ros2_teleop/lekiwi_teleop_node.py)
 
