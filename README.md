@@ -4,7 +4,9 @@ ROS2を使用したLeKiwiロボットのテレオペレーションと推論な�
 
 ## 概要
 
-このパッケージには5つのノードが含まれている:
+このパッケージは、テレオペレーション・推論・データ収集/変換を担う複数のノードとCLIツールで構成される。役割ごとに整理すると次のとおり。
+
+### 制御・推論ノード
 
 1. **lekiwi_teleop_node**: `lekiwi_host.py`を参考に作成されており、ZMQ通信の代わりにROS2トピック通信を使用してLeKiwiロボットを制御する。
 
@@ -12,9 +14,18 @@ ROS2を使用したLeKiwiロボットのテレオペレーションと推論な�
 
 3. **lekiwi_ros2_teleop_client**: SO100 Leader ArmとKeyboardからのテレオペレーション入力を受け取り、ROS2トピック経由でlekiwi_teleop_nodeを制御する。
 
-4. **lekiwi_data_recorder**: テレオペレーション中のデータをLeRobot Dataset v3形式で記録し、VLAモデルのトレーニングに使用できるデータセットを作成する。
+### データ収集・変換（データパイプライン）
 
-5. **lekiwi_vla_node** （⚠️ 開発中）: LeRobotのVLA (Vision-Language-Action) モデルを使用して、カメラ画像とロボット状態から次のアクションを自動生成する。
+4. **lekiwi_bag_recorder**: テレオペレーション中のトピックを生データ（MCAP bag）のまま記録する。エピソード単位でセッション/プロヴェナンス情報も保存する（データパイプラインのStage 1）。
+
+5. **lekiwi_rosbag_to_lerobot**: 記録したbagを時刻同期しながらLeRobot Dataset v3形式へ変換するCLIツール（データパイプラインのStage 2）。
+
+6. **lekiwi_data_recorder**: テレオペレーション中のデータをLeRobot Dataset v3形式で直接記録する（bagを介さない旧来の記録経路）。
+
+7. **lekiwi_upload_dataset**: 生成したデータセットをHugging Face HubへアップロードするCLIツール。
+
+> データパイプラインの設計・使い方の詳細は[docs/data_pipeline.md](docs/data_pipeline.md)を参照すること。
+
 
 ## データ記録
 
@@ -96,39 +107,6 @@ ros2 service call /lekiwi_data_recorder/save_dataset std_srvs/srv/Trigger
 └─────────────────────┘
 ```
 
-<!--
-### パターン2: VLA自律制御
-
-```
-┌─────────────────────┐
-│  lekiwi_teleop_node │ ← ロボット直接制御
-└──────────┬──────────┘
-           │ publishes
-           ↓
-    ┌──────────────┐
-    │ /joint_states│
-    │ /camera/...  │
-    └──────┬───────┘
-           │ subscribes
-           ↓
-  ┌────────────────┐
-  │ lekiwi_vla_node│ ← VLA推論
-  └────────┬───────┘
-           │ publishes
-           ↓
-    ┌──────────────┐
-    │ /cmd_vel     │
-    │ /arm_joint_  │
-    │  commands    │
-    └──────┬───────┘
-           │ subscribes
-           ↓
-┌─────────────────────┐
-│  lekiwi_teleop_node │ → ロボットへ送信
-└─────────────────────┘
-```
--->
-
 ## 機能
 
 ### lekiwi_teleop_node
@@ -147,15 +125,6 @@ ros2 service call /lekiwi_data_recorder/save_dataset std_srvs/srv/Trigger
 - **周波数設定**: `control_frequency`パラメータで制御ループ周波数を設定可能（30Hzで動作）
 
 詳細は[docs/POLICY_INFERENCE.md](docs/POLICY_INFERENCE.md)を参照すること。
-
-<!--
-### lekiwi_vla_node
-
-- **VLA推論**: LeRobotのVLAモデルを使用した自律動作生成
-- **マルチモーダル入力**: カメラ画像、関節状態、言語命令を統合
-- **時間的アンサンブル**: 滑らかな動作のための時間的フィルタリング
-- **リアルタイム制御**: 設定可能な推論周波数で動作
--->
 
 ### lekiwi_ros2_teleop_client
 
@@ -210,16 +179,6 @@ ros2 service call /lekiwi_data_recorder/save_dataset std_srvs/srv/Trigger
 - `use_amp` (bool, default: false): 自動混合精度を使用するか
 
 詳細は[docs/POLICY_INFERENCE.md](docs/POLICY_INFERENCE.md)を参照すること。
-
-<!--
-### lekiwi_vla_node
-
-- `policy_path` (string, required): VLAモデルのチェックポイントパス
-- `inference_frequency` (float, default: 10.0): 推論ループ周波数 (Hz)
-- `task_instruction` (string, default: "Pick up the object"): タスクの言語命令
-- `use_cuda` (bool, default: true): CUDAを使用するか
-- `temporal_ensemble_coeff` (float, default: 0.01): 時間的アンサンブルの係数 (0.0-1.0)
--->
 
 ### lekiwi_ros2_teleop_client
 
@@ -486,47 +445,6 @@ ros2 topic hz /lekiwi/cmd_vel
 
 <!-- teleop_twist_keyboardでキーを押したときに、`/lekiwi/cmd_vel`にメッセージが配信されていれば正常。 -->
 
-<!--
-### 2. VLA自律制御
-
-#### ターミナル1: Teleopノード（ロボット制御）
-
-```bash
-# デフォルトで実行
-ros2 run lekiwi_ros2_teleop lekiwi_teleop_node
-
-# パラメータを指定して実行
-ros2 run lekiwi_ros2_teleop lekiwi_teleop_node \
-  --ros-args \
-  -p robot_port:=/dev/ttyACM0 \
-  -p control_frequency:=30.0 \
-  -p rotate_front_camera:=true
-
-# フロントカメラの回転を無効化する場合
-ros2 run lekiwi_ros2_teleop lekiwi_teleop_node \
-  --ros-args -p rotate_front_camera:=false
-```
-
-#### ターミナル2: VLAノード（自律制御）
-
-```bash
-# VLAノードを実行（policy_pathは必須）
-# HuggingFace Hubからモデルを使用する場合
-ros2 run lekiwi_ros2_teleop lekiwi_vla_node \
-  --ros-args \
-  -p policy_path:=lerobot/smolvla_base \
-  -p task_instruction:="Pick up the red cup" \
-  -p inference_frequency:=10.0
-
-# ローカルのモデルを使用する場合
-ros2 run lekiwi_ros2_teleop lekiwi_vla_node \
-  --ros-args \
-  -p policy_path:=/path/to/your/local/policy \
-  -p task_instruction:="Pick up the red cup" \
-  -p inference_frequency:=10.0
-```
--->
-
 ### 3. キーボード単独でベース制御（Leader Armなし）
 
 Leader Armを使用せず、キーボードのみでベースを制御する場合：
@@ -553,69 +471,6 @@ ros2 run image_view image_view --ros-args \
 ```bash
 ros2 topic echo /lekiwi/joint_states
 ```
-
-<!--
-## 利用可能なVLAモデル
-
-### VLA (Vision-Language-Action) モデル
-
-#### 1. SmolVLA（推奨）
-- **モデルID**: `lerobot/smolvla_base`
-- **特徴**: 効率的でコスト効率の良いVision-Language-Actionモデル
-- **適用**: リアルタイム制御に最適（軽量で高速）
-- **論文**: [SmolVLA: A Vision-Language-Action Model for Affordable and Efficient Robotics](https://arxiv.org/abs/2506.01844)
-- **入力**: カメラ画像 + ロボット状態 + 言語命令
-
-```bash
-# SmolVLAの使用例
-ros2 run lekiwi_ros2_teleop lekiwi_vla_node \
-  --ros-args \
-  -p policy_path:=lerobot/smolvla_base \
-  -p task_instruction:="Pick up the object"
-```
-
-#### 2. X-VLA
-- **モデルID例**:
-  - `lerobot/xvla-base` - 基本モデル
-  - `lerobot/xvla-folding` - 布折りタスク特化
-  - `lerobot/xvla-libero` - LIBERO環境用
-  - `lerobot/xvla-google-robot` - Google Robotデータセット用
-  - `lerobot/xvla-agibot-world` - Agibot環境用
-- **特徴**: クロスエンボディメント対応（約0.9Bパラメータ）
-- **適用**: 複数のロボットプラットフォームでの汎用的なタスク実行
-
-```bash
-# X-VLAの使用例
-ros2 run lekiwi_ros2_teleop lekiwi_vla_node \
-  --ros-args \
-  -p policy_path:=lerobot/xvla-base \
-  -p task_instruction:="Grasp and move the cup"
-```
-
-### その他のLeRobotポリシーモデル
-
-以下のモデルもVLAノードで使用可能だ（言語命令なし）:
-
-- **ACT** (Action Chunking with Transformers)
-- **Diffusion Policy**
-- **PI0** & **PI05** (Physical Intelligence models)
-- **Groot**
-- **VQBeT**
-- **TDMPC**
-
-### モデルのダウンロード
-
-モデルは初回実行時に自動的にHugging Face Hubからダウンロードされる。
-ローカルにダウンロード済みのモデルを使用する場合は、そのパスを`policy_path`に指定すること。
-
-```bash
-# HuggingFace Hubから自動ダウンロード
--p policy_path:=lerobot/smolvla_base
-
-# ローカルモデルを使用
--p policy_path:=/path/to/local/model/checkpoint
-```
--->
 
 ## 依存関係
 

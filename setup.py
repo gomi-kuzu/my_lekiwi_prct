@@ -29,7 +29,6 @@ setup(
     entry_points={
         'console_scripts': [
             'lekiwi_teleop_node = lekiwi_ros2_teleop.lekiwi_teleop_node:main',
-            'lekiwi_vla_node = lekiwi_ros2_teleop.lekiwi_vla_node:main',
             'lekiwi_ros2_teleop_client = lekiwi_ros2_teleop.lekiwi_ros2_teleop_client:main',
             'lekiwi_data_recorder = lekiwi_ros2_teleop.lekiwi_data_recorder:main',
             'lekiwi_bag_recorder = lekiwi_ros2_teleop.lekiwi_bag_recorder:main',

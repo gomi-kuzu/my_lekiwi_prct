@@ -26,8 +26,7 @@ LeKiwiオムニホイールロボット（6自由度アーム搭載）のROS2制
 1. **テレオペレーション**: SO100 Leader Armとキーボードによる遠隔操作
 2. **データ収集**: LeRobot Dataset v3形式での学習データ記録
 3. **ポリシー推論**: 学習済みモデルによる自律制御（分散システム対応）
-4. **VLA推論**: Vision-Language-Actionモデルによる言語指示ベース制御
-5. **データセット管理**: 可視化、検証、Hugging Face Hubアップロード
+4. **データセット管理**: 可視化、検証、Hugging Face Hubアップロード
 
 ### システム構成
 - **ロボット側（Raspberry Pi）**: ロボット直接制御、センサーデータ配信
@@ -49,7 +48,7 @@ LeKiwiオムニホイールロボット（6自由度アーム搭載）のROS2制
 - **原則**: 計算負荷の高い処理（推論）とリアルタイム制御を分離
 - **実装**: 
   - Raspberry Pi: `lekiwi_teleop_node`（ロボット制御）
-  - Desktop PC: `lekiwi_policy_node`、`lekiwi_vla_node`（推論）
+  - Desktop PC: `lekiwi_policy_node`（推論）
 - **理由**: GPUリソースの効率的活用、ロボット側の負荷軽減
 
 #### 3. LeRobot互換性の維持
@@ -63,7 +62,6 @@ LeKiwiオムニホイールロボット（6自由度アーム搭載）のROS2制
   1. 基本テレオペ（`lekiwi_teleop_node`）
   2. データ記録（`lekiwi_data_recorder`）
   3. ポリシー推論（`lekiwi_policy_node`）
-  4. VLA推論（`lekiwi_vla_node`）
 - **理由**: 早期のフィードバック、リスク軽減
 
 ### トピック設計
@@ -97,7 +95,7 @@ LeKiwiオムニホイールロボット（6自由度アーム搭載）のROS2制
 
 #### ノード名
 - パターン: `lekiwi_<機能>_node`
-- 例: `lekiwi_teleop_node`, `lekiwi_policy_node`, `lekiwi_vla_node`
+- 例: `lekiwi_teleop_node`, `lekiwi_policy_node`
 
 #### トピック名
 - パターン: `/lekiwi/<カテゴリ>/<詳細>`
@@ -114,10 +112,14 @@ LeKiwiオムニホイールロボット（6自由度アーム搭載）のROS2制
 ### 必須コンポーネント
 
 #### ROS2環境
-- **ディストリビューション**: ROS2 Jazzy
+- **ディストリビューション**: ROS2 Jazzy（RoboStack / conda経由でインストール）
 - **Python**: 3.12
 - **ビルドシステム**: colcon
 - **パッケージタイプ**: ament_python
+- **環境アクティベート**: `colcon` や `ros2` コマンドは conda 環境を有効化しないと使えない。作業前に必ず実行すること:
+  ```bash
+  conda activate leros_jazzy
+  ```
 
 #### LeRobotフレームワーク
 - **バージョン**: 最新（GitHub main）
@@ -125,10 +127,10 @@ LeKiwiオムニホイールロボット（6自由度アーム搭載）のROS2制
 - **データ形式**: LeRobot Dataset v3
 - **主要API**:
   ```python
-  from lerobot.common.robot_devices.robots.factory import make_robot
-  from lerobot.common.datasets.factory import make_dataset
-  from lerobot.common.policies.factory import make_policy
-  from lerobot.scripts.push_dataset_to_hub import push_dataset_to_hub
+  from lerobot.datasets.lerobot_dataset import LeRobotDataset
+  from lerobot.policies.factory import make_policy, make_pre_post_processors
+  from lerobot.robots.lekiwi import LeKiwiClient, LeKiwiClientConfig
+  from lerobot.utils.feature_utils import build_dataset_frame
   ```
 
 #### ハードウェアインターフェース
@@ -164,8 +166,8 @@ LeKiwiオムニホイールロボット（6自由度アーム搭載）のROS2制
 
 #### 1.2 参照実装の活用
 - **必須参照**: LeRobotの公式スクリプト
-  - `lerobot/scripts/lerobot_record.py` - データ記録の参考
-  - `lerobot/scripts/control_robot.py` - ロボット制御の参考
+  - `lerobot/src/lerobot/record.py` - データ記録の参考
+  - `lerobot/src/lerobot/teleoperate.py` - テレオペ・ロボット制御の参考
 - **DO**: LeRobotのAPIとデータ構造を正確に模倣する
 - **DON'T**: 独自のデータ形式や制御フローを発明しない
 
@@ -216,8 +218,10 @@ def wait_for_observations(self, timeout_sec=10.0):
 #### 2.3 デバイスエラーの処理
 ```python
 try:
-    # ロボット接続試行
-    robot = make_robot(robot_type, port=robot_port)
+    # ロボット接続試行（LeKiwiClientを使用）
+    from lerobot.robots.lekiwi import LeKiwiClient, LeKiwiClientConfig
+    robot = LeKiwiClient(LeKiwiClientConfig(remote_ip=remote_ip, id=robot_id))
+    robot.connect()
 except Exception as e:
     self.get_logger().error(f'Failed to connect to robot: {e}')
     self.get_logger().info('Please check:')
@@ -376,8 +380,8 @@ from rclpy.node import Node
 from sensor_msgs.msg import JointState
 
 # 4. LeRobot
-from lerobot.common.robot_devices.robots.factory import make_robot
-from lerobot.common.datasets.factory import make_dataset
+from lerobot.datasets.lerobot_dataset import LeRobotDataset
+from lerobot.policies.factory import make_policy
 
 # 5. ローカル（必要に応じて）
 from .utils import transform_image
@@ -503,12 +507,14 @@ arm_action = action_array[3:9]
 
 #### 必須ドキュメント
 ```
+README.md                      # プロジェクト概要、クイックスタート（リポジトリルート）
 docs/
-├── README.md              # プロジェクト概要、クイックスタート
-├── RECORDING.md           # データ記録の詳細ガイド
-├── POLICY_INFERENCE.md    # ポリシー推論の詳細ガイド
-├── custom_joy_setup.md    # ジョイスティック設定
-└── copilot-instructions.md # このファイル
+├── RECORDING.md               # データ記録の詳細ガイド
+├── POLICY_INFERENCE.md        # ポリシー推論の詳細ガイド
+├── data_pipeline.md           # rosbag → LeRobot Dataset 変換パイプライン
+└── custom_joy_setup.md        # ジョイスティック設定
+.github/
+└── copilot-instructions.md    # このファイル
 ```
 
 ### 2. ドキュメント記述ルール
@@ -668,18 +674,7 @@ def stop_episode_callback(self, request, response):
 - 画像フィーチャーに`names: ["height", "width", "channels"]`必須
 - `resume=True`で既存データセットに追記可能
 
-### 4. lekiwi_vla_node.py
-
-**責務**: Vision-Language-Actionモデルによる言語指示ベース制御
-
-**主要機能**:
-- SmolVLA、X-VLAなどのVLAモデル推論
-- 言語タスク指示の処理
-- 時間的アンサンブルによる滑らかな制御
-
-**実行環境**: Desktop PC（GPU推奨）
-
-### 5. lekiwi_ros2_teleop_client.py
+### 4. lekiwi_ros2_teleop_client.py
 
 **責務**: テレオペレーション入力のROS2トピック変換
 
@@ -690,7 +685,7 @@ def stop_episode_callback(self, request, response):
 
 **実行環境**: Desktop PC
 
-### 6. サポートスクリプト
+### 5. サポートスクリプト
 
 #### upload_dataset.py
 - データセットをHugging Face Hubにアップロード
@@ -705,6 +700,17 @@ def stop_episode_callback(self, request, response):
 ## トラブルシューティングパターン
 
 ### 1. ビルドエラー
+
+#### パターン0: colcon / ros2 コマンドが見つからない
+**症状**: `colcon: command not found` または `ros2: command not found`
+
+**原因**: ROS2（RoboStack）のconda環境が未アクティベート
+
+**解決策**:
+```bash
+conda activate leros_jazzy
+```
+※ `colcon build` や `ros2 run` などROS2系コマンドを使う前に必ず実行する。
 
 #### パターン1: SyntaxError during build
 **症状**: `colcon build`時にPythonファイルの構文エラー
@@ -917,8 +923,8 @@ ls ~/lerobot_datasets/username/dataset/data/*.parquet | wc -l
 
 # データロードテスト
 python3 -c "
-from lerobot.common.datasets.factory import make_dataset
-dataset = make_dataset('username/dataset', root='~/lerobot_datasets')
+from lerobot.datasets.lerobot_dataset import LeRobotDataset
+dataset = LeRobotDataset('username/dataset', root='~/lerobot_datasets')
 print(f'Episodes: {dataset.num_episodes}')
 print(f'Frames: {dataset.num_frames}')
 "
@@ -934,6 +940,9 @@ print(f'Frames: {dataset.num_frames}')
 ```bash
 # ROS2 Jazzy インストール
 # LeRobot インストール（ロボット制御のみ必要）
+# conda環境をアクティベート（colcon/ros2に必須）
+conda activate leros_jazzy
+
 # 環境変数設定
 export LEROBOT_PATH="$HOME/lerobot/src"
 export ROS_DOMAIN_ID=42
@@ -951,6 +960,9 @@ sudo systemctl enable lekiwi-teleop.service
 ```bash
 # ROS2 Jazzy + CUDA + PyTorch インストール
 # LeRobot完全インストール
+# conda環境をアクティベート（colcon/ros2に必須）
+conda activate leros_jazzy
+
 # 環境変数設定
 export LEROBOT_PATH="$HOME/study/lerobot/src"
 export ROS_DOMAIN_ID=42
@@ -1084,9 +1096,9 @@ nvidia-smi -l 1
 - **LeKiwi SDK**: （プロジェクト内ドキュメント参照）
 
 ### 重要なLeRobotスクリプト
-- `lerobot/scripts/lerobot_record.py` - データ記録の参照実装
-- `lerobot/scripts/control_robot.py` - ロボット制御の参照実装
-- `lerobot/scripts/train.py` - トレーニングの参照実装
+- `lerobot/src/lerobot/record.py` - データ記録の参照実装
+- `lerobot/src/lerobot/teleoperate.py` - テレオペ・ロボット制御の参照実装
+- `lerobot/src/lerobot/scripts/train.py` - トレーニングの参照実装
 
 ### コミュニティ
 - **LeRobot Discord**: https://discord.gg/s3KuuzsPFb
@@ -1097,11 +1109,16 @@ nvidia-smi -l 1
 ## バージョン管理
 
 ### このドキュメントのバージョン
-- **Version**: 1.0
-- **Last Updated**: 2026-01-17
+- **Version**: 1.1
+- **Last Updated**: 2026-10-22
 - **Author**: LeKiwi ROS2 Development Team
 
 ### 更新履歴
+- **1.1 (2026-10-22)**:
+  - `lekiwi_vla_node`（未完成・デッドコード）の削除に伴い関連記述を除去
+  - LeRobot API参照を現行名前空間（`lerobot.datasets` / `lerobot.policies` / `lerobot.robots` 等）に更新
+  - ドキュメント構成リストを実ファイル構成に合わせて修正
+  - ROS2環境のconda有効化手順（`conda activate leros_jazzy`）を追記
 - **1.0 (2026-01-17)**: 初版作成
   - プロジェクト全体のガイドライン確立
   - 既存コンポーネントのドキュメント化
