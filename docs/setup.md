@@ -31,6 +31,11 @@ pip install -e ".[dataset,training]"
 
 インストール後、`LEROBOT_PATH` 環境変数を設定する（[§3](#3-環境変数)）。
 
+### 本パッケージ
+- `[ワークスペース]/src`以下にgit clone
+- `[ワークスペース]`でcolconビルド
+- `source install/setup.bash`
+
 ---
 
 ## 2. カメラデバイスパスの確認と設定（必須）

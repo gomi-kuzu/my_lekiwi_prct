@@ -73,23 +73,20 @@ LeRobot は ROS2 非依存のまま保たれ、ブリッジ層が変換を担う
 詳細は [docs/policy_inference.md](docs/policy_inference.md) を参照すること。
 
 ## 検証済み環境・依存関係
-
+- OS Ubuntu24
 - ROS2 Jazzy
 - Python 3.12
 - rclpy / geometry_msgs / sensor_msgs / cv_bridge
 - opencv-python (cv2) / numpy / torch
 - [LeRobot](https://github.com/huggingface/lerobot) **v0.6.2 以上**（LeKiwi ハードウェア抽象化・ポリシー推論）
 
-### 環境変数
 
-- `LEROBOT_PATH`（**必須**）: LeRobot ライブラリの `src` ディレクトリへのパス
-- `LEKIWI_REMOTE_IP`（`lekiwi_ros2_teleop_client` で必須）: LeKiwi ロボットの IP アドレス
-  （ROS2 トピック通信ではなく、LeRobot の `LeKiwiClient` による ZeroMQ 直接接続に使う）
+## クイックスタート
 
-環境変数が未設定だと、各ノードは起動時にエラーを出力する。
-インストール・カメラ設定・環境変数の詳細は [docs/setup.md](docs/setup.md) を参照すること。
+### セットアップ
+- [docs/setup.md](docs/setup.md) を参照
 
-## ビルド
+### ビルド
 
 ```bash
 cd [ROS2 のワークスペース]
@@ -98,8 +95,6 @@ source install/setup.bash
 ```
 
 > 以降、各ターミナルで作業する前に `source install/setup.bash` を実行すること。
-
-## クイックスタート
 
 ### テレオペレーション
 
