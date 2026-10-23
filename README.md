@@ -156,6 +156,7 @@ ros2 run image_view image_view --ros-args \
 | [docs/policy_inference.md](docs/policy_inference.md) | ポリシー推論ノードの使い方 |
 | [docs/custom_joy_setup.md](docs/custom_joy_setup.md) | ジョイスティック設定 |
 | [docs/direct_recording.md](docs/direct_recording.md) | LeRobot へ直接記録する旧経路（非推奨） |
+| [docs/train_guide.md](docs/train_guide.md)| 転移学習方法の参考文書 |
 
 ## ライセンス
 
