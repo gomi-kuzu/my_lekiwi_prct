@@ -1,4 +1,4 @@
-# LeKiwi ROS2 Teleoperation
+# LeKiwi controller and tools for ROS2
 
 ROS2 を使用した LeKiwi ロボットのテレオペレーション・推論・データ収集を行うパッケージ。
 
