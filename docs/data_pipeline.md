@@ -66,6 +66,45 @@ flowchart LR
 - Launch: [lekiwi_bag_record.launch.py](../launch/lekiwi_bag_record.launch.py)
 - 内部で `ros2 bag record -s mcap -o <ep_dir>/bag <topics...>` を subprocess 起動し、`stop_episode` サービスで SIGINT を送って正常終了させる。
 
+`lekiwi_bag_record.launch.py` を起動すると、`launch_teleop:=true` のときのみ teleop クライアント（任意）と、常に bag レコーダが立ち上がり、レコーダが `ros2 bag record` を子プロセスとして管理する。teleop のトピックを購読するのは **`ros2 bag record` 子プロセス**であり、レコーダノード自身はトピックを購読せず、エピソード境界（start/stop）とメタ生成・子プロセス制御だけを担う。
+
+```
+                       ros2 launch lekiwi_ros2_teleop lekiwi_bag_record.launch.py
+                                              │
+              ┌───────────────────────────────┴───────────────────────────────┐
+              │ (launch_teleop:=true のときのみ)                                │ (常に起動)
+              ▼                                                                ▼
+ ┌──────────────────────────┐                             ┌──────────────────────────────────────┐
+ │ lekiwi_teleop_client      │                             │ lekiwi_bag_recorder (Node)            │
+ │ (任意 / 別マシンでも可)    │                             │  - session.yaml / episode.yaml 生成    │
+ │  リーダーアーム + joy/kbd  │                             │  - provenance (git/software) 保存      │
+ └────────────┬─────────────┘                             │  - start/stop_episode サービス提供      │
+              │ publish                                    │  - `ros2 bag record` を subprocess 管理 │
+              │                                            └──────────────────┬───────────────────┘
+              │                                                               │ Popen / SIGINT
+              │   ROS2 Topics (DDS)                                           ▼
+              │  /lekiwi/joint_states              ┌────────────────────────────────────────────┐
+              │  /lekiwi/cmd_vel                   │ ros2 bag record -s mcap -o <ep>/bag <topics> │
+              │  /lekiwi/arm_joint_commands        │  （レコーダの子プロセス。topics を購読）        │
+              │  /lekiwi/camera/front/.../compressed──────────────► subscribe すべて              │
+              │  /lekiwi/camera/wrist/.../compressed│                                             │
+              └───────────────────────────────────►│                                             │
+                   ※teleop/推論/他マシンの            └──────────────────────┬─────────────────────┘
+                     どの publisher でも可                                   │ write (CompressedImage のまま)
+                                                                            ▼
+                                              lekiwi_bags/session_YYYYmmdd_HHMMSS/
+                                                ├─ session.yaml / software.json / *.diff
+                                                └─ episode_XXXXXX/
+                                                     ├─ bag/   (metadata.yaml + *.mcap)
+                                                     └─ episode.yaml  (stop 時に sha256/duration 追記)
+
+ 制御フロー:
+   ros2 service call /lekiwi_bag_recorder/start_episode  → episode_XXXXXX/ 作成 + `ros2 bag record` 起動
+   ros2 service call /lekiwi_bag_recorder/stop_episode   → 子プロセスへ SIGINT → bag finalize → meta 更新
+```
+
+> ポイント: `lekiwi_bag_recorder` は**トピックを直接 subscribe しない**。実際に録画するのは起動した `ros2 bag record` 子プロセスで、レコーダはその起動・SIGINT 停止とメタデータ生成に徹する。publisher はこの launch 内の teleop に限らず、別マシンのテレオペ・推論ノード・他ツールでもよい（DDS グラフ上に該当トピックが流れていれば録画される）。
+
 ### 3.3 記録するトピック（デフォルト）
 
 - `/lekiwi/joint_states`
