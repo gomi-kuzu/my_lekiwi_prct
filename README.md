@@ -150,13 +150,13 @@ ros2 run image_view image_view --ros-args \
 
 | ドキュメント | 内容 |
 |---|---|
-| [docs/setup.md](docs/setup.md) | インストール・カメラ設定・環境変数 |
-| [docs/nodes.md](docs/nodes.md) | ノード・トピック・パラメータのリファレンス |
-| [docs/data_pipeline.md](docs/data_pipeline.md) | データ収集 → 変換パイプライン（**推奨**） |
-| [docs/policy_inference.md](docs/policy_inference.md) | ポリシー推論ノードの使い方 |
-| [docs/custom_joy_setup.md](docs/custom_joy_setup.md) | ジョイスティック設定 |
-| [docs/direct_recording.md](docs/direct_recording.md) | LeRobot へ直接記録する旧経路（非推奨） |
-| [docs/train_guide.md](docs/train_guide.md)| 転移学習方法の参考文書 |
+| [setup.md](docs/setup.md) | インストール・カメラ設定・環境変数 |
+| [nodes.md](docs/nodes.md) | ノード・トピック・パラメータのリファレンス |
+| [data_pipeline.md](docs/data_pipeline.md) | データ収集 → 変換パイプライン（**推奨**） |
+| [policy_inference.md](docs/policy_inference.md) | ポリシー推論ノードの使い方 |
+| [custom_joy_setup.md](docs/custom_joy_setup.md) | ジョイスティック設定 |
+| [direct_recording.md](docs/direct_recording.md) | LeRobot へ直接記録する旧経路（非推奨） |
+| [train_guide.md](docs/train_guide.md)| 転移学習方法の参考文書 |
 
 ## ライセンス
 
